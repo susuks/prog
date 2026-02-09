@@ -9,6 +9,7 @@ __pycache__/
 .wwebjs_auth_media/
 session-sessao-media/
 back/
+varios/
 
 # Credenciais e Configurações Pessoais
 credentials.json
@@ -16,6 +17,7 @@ config.txt
 sticker_id.txt
 sticker_pronto.webp
 historico_ids.txt
+back.rar
 
 
 # Arquivos temporários e de log
