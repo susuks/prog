@@ -1,0 +1,1 @@
+pip install selenium pandas gspread oauth2client webdriver-manager 
