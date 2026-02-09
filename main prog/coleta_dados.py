@@ -5,6 +5,7 @@ import gspread
 import shutil
 import re
 import json
+import winsound # Para fazer o BIP
 from datetime import datetime
 import pandas as pd
 from oauth2client.service_account import ServiceAccountCredentials
@@ -71,7 +72,7 @@ def adicionar_para_reanalise(contrato, vendedor_nome, vendedor_tel, nome_planilh
         "vendedor_tel": vendedor_tel,
         "nome_planilha": nome_planilha,
         "origem": origem,
-        "dados_originais": dados_completos, # Guarda dados como credito, grupo, cota pra não perder
+        "dados_originais": dados_completos,
         "tentativas": 0,
         "proxima_verificacao": time.time() + INTERVALO_REANALISE_SEGUNDOS
     }
@@ -81,7 +82,6 @@ def adicionar_para_reanalise(contrato, vendedor_nome, vendedor_tel, nome_planilh
 # --- GOOGLE SHEETS E ARQUIVOS ---
 
 def salvar_historico_concluido(contrato, nome_planilha, vendedor_nome, vendedor_tel, status_pag):
-    # REQUISITO 1: Histórico completo para o Monitor ler
     existe = os.path.exists(ARQUIVO_HISTORICO_SUCESSO)
     try:
         with open(ARQUIVO_HISTORICO_SUCESSO, 'a', encoding='utf-8') as f:
@@ -89,7 +89,10 @@ def salvar_historico_concluido(contrato, nome_planilha, vendedor_nome, vendedor_
                 f.write("contrato,planilha_destino,data_registro,vendedor_nome,vendedor_tel,status_pagamento\n")
             
             data_hora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-            linha = f"{contrato},{nome_planilha},{data_hora},{vendedor_nome},{vendedor_tel},{status_pag}\n"
+            safe_planilha = str(nome_planilha).replace(",", ".")
+            safe_nome = str(vendedor_nome).replace(",", ".")
+            
+            linha = f"{contrato},{safe_planilha},{data_hora},{safe_nome},{vendedor_tel},{status_pag}\n"
             f.write(linha)
     except Exception as e:
         print(f"   [ERRO HISTÓRICO] {e}")
@@ -135,9 +138,22 @@ def fazer_login_automatico(driver):
         WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "j_username")))
         driver.find_element(By.ID, "j_username").send_keys(USUARIO_LOGIN)
         driver.find_element(By.ID, "j_password").send_keys(SENHA_LOGIN)
-        print("\n [LOGIN] Insira o Captcha manual...")
+        
+        print("\n" + "="*60)
+        print(" AGUARDANDO CAPTCHA... POR FAVOR RESOLVA!")
+        print("="*60 + "\n")
+        
         WebDriverWait(driver, 600).until(EC.frame_to_be_available_and_switch_to_it((By.NAME, "mainFrame")))
         driver.switch_to.default_content()
+        
+        # --- AVISO SONORO E VISUAL ---
+        print("\n" + "#"*60)
+        print(" SUCESSO! LOGIN DETECTADO. O ROBÔ ESTÁ OPERANDO.")
+        print("#"*60 + "\n")
+        try: winsound.Beep(1000, 500) # Frequencia 1000Hz, 500ms
+        except: pass
+        # -----------------------------
+        
         return True
     except: return False
 
@@ -165,12 +181,10 @@ def buscar_contrato(driver, contrato):
         except: pass
         time.sleep(1)
         
-        # Volta pro frame de conteúdo para extrair dados
         driver.switch_to.default_content()
         WebDriverWait(driver, 5).until(EC.frame_to_be_available_and_switch_to_it((By.NAME, "mainFrame")))
         WebDriverWait(driver, 5).until(EC.frame_to_be_available_and_switch_to_it((By.NAME, "MainFrame")))
         
-        # Verifica sucesso
         driver.find_element(By.XPATH, "//td[contains(text(), 'Consorciado:')]")
         return True
     except:
@@ -179,7 +193,6 @@ def buscar_contrato(driver, contrato):
 def extrair_dados_e_pagamento(driver):
     dados = {'credito': 0.00, 'nome': '-', 'telefone': '-', 'data_venda': '', 'grupo': '-', 'cota': '-', 'pago': False}
     
-    # Extração Padrão
     try: dados['nome'] = driver.find_element(By.XPATH, "//td[contains(text(), 'Consorciado:')]/following-sibling::td").text
     except: pass
     try: dados['credito'] = limpar_valor(driver.find_element(By.XPATH, "//td[contains(text(), 'Crédito:')]/following-sibling::td").text)
@@ -198,21 +211,21 @@ def extrair_dados_e_pagamento(driver):
         dados['telefone'] = driver.find_element(By.XPATH, "//table//tr[2]/td[2]").text.strip()
     except: pass
 
-    # REQUISITO 1: Extrair Pagamento
+    # REQUISITO 1 (Corrigido): Voltar para a aba principal correta (Consorciado)
     try:
-        # Tenta voltar para aba principal (caso esteja na de telefones)
-        driver.find_element(By.XPATH, "//a[contains(text(), 'Cotas Credenciamento')]").click() # Ou 'Voltar' se houver
+        driver.find_element(By.LINK_TEXT, "Consorciado").click() # Clica na aba exata
         time.sleep(1)
-    except: pass
+    except: 
+        # Fallback se link text falhar
+        try: driver.find_element(By.XPATH, "//a[contains(text(), 'Consorciado')]").click()
+        except: pass
 
     try:
-        # Tenta o XPath fornecido pelo usuário, com fallback
         valor_pago = 0
         try:
             elem = driver.find_element(By.XPATH, "/html/body/table[8]/tbody/tr[25]/td[2]/span")
             valor_pago = limpar_valor(elem.text)
         except:
-            # Fallback genérico: Procura o texto na tela
             elem = driver.find_element(By.XPATH, "//td[contains(text(), 'Parcelas Pagas:')]/following-sibling::td")
             valor_pago = limpar_valor(elem.text)
         
@@ -225,23 +238,17 @@ def extrair_dados_e_pagamento(driver):
 
 def atualizar_planilha(sheet, row_csv, dados_site, contrato):
     linha = encontrar_proxima_linha_vazia(sheet)
+    status_pag = "1º Parcela Paga" if dados_site['pago'] else "" 
     
-    # REQUISITO 1: Coluna B (Status Pagamento)
-    status_pag = "1º Parcela Paga" if dados_site['pago'] else "" # Deixa vazio se não pagou
-    
-    # P1: Data, Nome, Tel, (Vazio), Origem
     p1 = [str(dados_site['data_venda']), str(dados_site['nome']), str(dados_site['telefone']), "", str(row_csv.get('origem'))]
     
-    # P2: Crédito, Lance, (Vazio), Contrato, Grupo, Cota
     lance_val = 0.00
     try: lance_val = float(str(row_csv.get('lance livre', 0)).replace("R$", "").replace(".", "").replace(",", ".").strip())
     except: pass
     
     p2 = [dados_site['credito'], lance_val, "", str(contrato), str(dados_site['grupo']), str(dados_site['cota'])]
 
-    # Atualiza Status na Coluna B (Indice 2, Linha X)
     sheet.update_cell(linha, 2, status_pag) 
-
     sheet.update(range_name=f"D{linha}:H{linha}", values=[p1], value_input_option='USER_ENTERED')
     sheet.update(range_name=f"J{linha}:O{linha}", values=[p2], value_input_option='USER_ENTERED')
     
@@ -256,14 +263,13 @@ def loop_servico():
 
     while True:
         try:
-            # 1. PROCESSAMENTO DE NOVOS (Prioridade)
             if os.path.exists(ARQUIVO_FILA):
                 try: shutil.move(ARQUIVO_FILA, ARQUIVO_EM_PROCESSAMENTO)
                 except: time.sleep(1); continue
 
                 try:
                     df = pd.read_csv(ARQUIVO_EM_PROCESSAMENTO, sep=',', dtype=str)
-                    df.columns = [c.strip() for c in df.columns] # Limpa espaços
+                    df.columns = [c.strip() for c in df.columns] 
                 except:
                     if os.path.exists(ARQUIVO_EM_PROCESSAMENTO): os.remove(ARQUIVO_EM_PROCESSAMENTO)
                     continue
@@ -271,7 +277,7 @@ def loop_servico():
                 for index, row in df.iterrows():
                     contrato = row.get('contrato')
                     vendedor = row.get('vendedor')
-                    vendedor_tel = row.get('telefone') # REQUISITO 3
+                    vendedor_tel = row.get('telefone')
                     
                     if pd.isna(contrato): continue
 
@@ -291,9 +297,7 @@ def loop_servico():
                         texto_status = "1º Parcela Paga" if dados['pago'] else "1º Parcela Não Paga"
                         salvar_historico_concluido(contrato, nome_planilha, vendedor, vendedor_tel, texto_status)
                         
-                        # REQUISITO 4: Agendar Reanálise se não pagou
                         if not dados['pago']:
-                            # Salva dados completos para não precisar ler o CSV de novo
                             dados_completos_para_json = row.to_dict()
                             adicionar_para_reanalise(contrato, vendedor, vendedor_tel, nome_planilha, row.get('origem'), dados_completos_para_json)
                         
@@ -303,12 +307,9 @@ def loop_servico():
 
                 if os.path.exists(ARQUIVO_EM_PROCESSAMENTO): os.remove(ARQUIVO_EM_PROCESSAMENTO)
 
-            # 2. REANÁLISE PERIÓDICA (Requisito 4)
             pendentes = carregar_pendentes()
             agora = time.time()
             mudou_pendentes = False
-
-            # Cria lista para iterar com segurança
             lista_pendentes = list(pendentes.items()) 
 
             for contrato, info in lista_pendentes:
@@ -322,11 +323,8 @@ def loop_servico():
                             print("   [PAGAMENTO DETECTADO] Atualizando planilha...")
                             sheet = conectar_google_sheets(info['nome_planilha'])
                             if sheet:
-                                # Lógica simplificada: Adiciona nova linha (ou poderia buscar e editar, mas adicionar nova é mais seguro para histórico)
                                 atualizar_planilha(sheet, info['dados_originais'], dados, contrato)
                                 salvar_historico_concluido(contrato, info['nome_planilha'], info['vendedor_nome'], info['vendedor_tel'], "1º Parcela Paga (Reanálise)")
-                                
-                                # Remove da lista de pendentes pois já pagou
                                 del pendentes[contrato]
                                 mudou_pendentes = True
                         else:
@@ -342,8 +340,7 @@ def loop_servico():
             if mudou_pendentes:
                 salvar_pendentes(pendentes)
 
-            # 3. KEEP ALIVE
-            time.sleep(5) # Ciclo rápido
+            time.sleep(5) 
 
         except Exception as e:
             print(f"Erro Loop Geral: {e}")

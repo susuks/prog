@@ -10,7 +10,7 @@ const ARQUIVO_FILA = 'fila_vendas.csv';
 const ARQUIVO_HISTORICO_SUCESSO = 'historico_concluidos.csv'; 
 
 let mapaVendedores = {};
-let contratosAvisados = new Set(); // Memória RAM para não repetir aviso
+let contratosAvisados = new Set(); 
 let sistemaIniciado = false;
 
 const client = new Client({
@@ -44,7 +44,6 @@ function contratoJaProcessado(contrato) {
         const fila = fs.readFileSync(ARQUIVO_FILA, 'utf-8');
         if (fila.includes(contrato)) return true;
     }
-    // Verifica se já está no histórico final (evita reprocessar antigos)
     if (fs.existsSync(ARQUIVO_HISTORICO_SUCESSO)) {
         const historico = fs.readFileSync(ARQUIVO_HISTORICO_SUCESSO, 'utf-8');
         if (historico.includes(contrato)) return true;
@@ -53,7 +52,6 @@ function contratoJaProcessado(contrato) {
 }
 
 function salvarNaFila(dados) {
-    // REQUISITO 3: Adicionei coluna 'telefone'
     if (!fs.existsSync(ARQUIVO_FILA)) {
         fs.writeFileSync(ARQUIVO_FILA, "contrato,origem,vendedor,lance livre,telefone\n");
     }
@@ -62,34 +60,29 @@ function salvarNaFila(dados) {
     console.log(`[FILA] 📥 Contrato ${dados.contrato} enviado para o Python.`);
 }
 
-// REQUISITO 3: Feedback Responsivo
 function verificarConcluidosEConfirmar() {
     if (!fs.existsSync(ARQUIVO_HISTORICO_SUCESSO)) return;
 
-    // Lê o arquivo de concluídos
     const stream = fs.createReadStream(ARQUIVO_HISTORICO_SUCESSO).pipe(csv());
     
     stream.on('data', async (row) => {
-        // Formato esperado do Python: contrato, planilha, data, vendedor_nome, vendedor_tel, status_pagamento
         const contrato = row.contrato;
-        const telefone = row.vendedor_tel; 
-        const status = row.status_pagamento;
+        const telefone = row.vendedor_tel || row['número'] || row.numero; 
+        const status = row.status_pagamento || row['1º paga'];
 
-        if (contrato && telefone && !contratosAvisados.has(contrato)) {
-            contratosAvisados.add(contrato); // Marca como avisado na memória
-
-            // Evita avisar contratos muito velhos (carregados na inicialização)
-            // Se quiser avisar só os de "agora", pode usar timestamp, mas por enquanto vamos avisar todos que aparecerem novos no arquivo
-            
-            try {
-                const chatId = `${telefone}@c.us`;
-                let msg = `✅ *Cadastro Confirmado!*\n\n📄 Contrato: ${contrato}\n📊 Planilha: Atualizada\n💰 Status: ${status}`;
-                
-                await client.sendMessage(chatId, msg);
-                console.log(`[FEEDBACK] Mensagem de confirmação enviada para ${telefone} sobre contrato ${contrato}`);
-            } catch (e) {
-                console.error(`[ERRO FEEDBACK] Não consegui enviar msg para ${telefone}: ${e.message}`);
-            }
+        if (contrato && !contratosAvisados.has(contrato)) {
+            if (telefone) {
+                contratosAvisados.add(contrato);
+                try {
+                    const chatId = `${telefone.replace(/\D/g, '')}@c.us`; 
+                    let msg = `✅ *Cadastro Confirmado!*\n\n📄 Contrato: ${contrato}\n📊 Planilha: Atualizada\n💰 Status: ${status}`;
+                    
+                    await client.sendMessage(chatId, msg);
+                    console.log(`[FEEDBACK] ✅ Mensagem enviada para ${telefone} (Contrato: ${contrato})`);
+                } catch (e) {
+                    console.error(`[ERRO FEEDBACK] Falha ao enviar para ${telefone}: ${e.message}`);
+                }
+            } 
         }
     });
 }
@@ -101,33 +94,8 @@ function extrairDados(texto) {
     return null;
 }
 
-// --- ROTINA PRINCIPAL ---
-
-client.on('qr', (qr) => qrcode.generate(qr, { small: true }));
-
-client.on('ready', () => {
-    if (sistemaIniciado) return;
-    sistemaIniciado = true;
-    console.log('\n>>> MONITOR V7.1 (RESPONSIVO) INICIADO <<<');
-    carregarVendedores();
-    
-    // Carrega o histórico atual na memória para não mandar msg de coisas velhas
-    if (fs.existsSync(ARQUIVO_HISTORICO_SUCESSO)) {
-         fs.createReadStream(ARQUIVO_HISTORICO_SUCESSO)
-            .pipe(csv())
-            .on('data', (row) => { if(row.contrato) contratosAvisados.add(row.contrato); })
-            .on('end', () => {
-                console.log(`[SISTEMA] Histórico sincronizado. Iniciando verificação de novos...`);
-                // Inicia o loop de verificação de feedback a cada 10 segundos
-                setInterval(verificarConcluidosEConfirmar, 10000); 
-            });
-    } else {
-        setInterval(verificarConcluidosEConfirmar, 10000);
-    }
-});
-
-client.on('message_create', async (msg) => {
-    if (!sistemaIniciado) return;
+// --- FUNÇÃO DE PROCESSAMENTO CENTRAL (Usada em tempo real e na recuperação) ---
+async function processarMensagem(msg) {
     try {
         if (msg.from === 'status@broadcast' || msg.from.includes('@lid')) return;
         
@@ -157,7 +125,7 @@ client.on('message_create', async (msg) => {
 
                 if (nomeVendedor !== "Desconhecido") {
                     dados.vendedor = nomeVendedor;
-                    dados.telefone = idAutor; // REQUISITO 3: Passando telefone
+                    dados.telefone = idAutor; 
 
                     if (!contratoJaProcessado(dados.contrato)) {
                         console.log(`[NOVO] Vendedor: ${nomeVendedor} | Contrato: ${dados.contrato}`);
@@ -169,6 +137,66 @@ client.on('message_create', async (msg) => {
     } catch (e) {
         console.error(`[ERRO MSG]: ${e.message}`);
     }
+}
+
+// --- ROTINA DE RECUPERAÇÃO (RESTAURADA) ---
+async function recuperarMensagensAntigas() {
+    console.log('\n>>> INICIANDO ROTINA DE RECUPERAÇÃO <<<');
+    console.log('Lendo as últimas 10 mensagens de cada vendedor cadastrado...');
+    
+    const atraso = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+    for (const [telefone, nome] of Object.entries(mapaVendedores)) {
+        try {
+            const chatId = `${telefone}@c.us`;
+            const chat = await client.getChatById(chatId);
+            const mensagens = await chat.fetchMessages({ limit: 10 });
+            
+            console.log(`   > Verificando ${nome} (${mensagens.length} msgs)...`);
+            
+            for (const msg of mensagens) {
+                await processarMensagem(msg);
+            }
+            await atraso(500); 
+        } catch (erro) {
+            // Ignora se chat não existir
+        }
+    }
+    console.log('>>> RECUPERAÇÃO CONCLUÍDA. MODO TEMPO REAL ATIVO. <<<\n');
+}
+
+// --- ROTINA PRINCIPAL ---
+
+client.on('qr', (qr) => qrcode.generate(qr, { small: true }));
+
+client.on('ready', () => {
+    if (sistemaIniciado) return;
+    sistemaIniciado = true;
+    console.log('\n>>> MONITOR V7.2 (RESPONSIVO + RECUPERAÇÃO) INICIADO <<<');
+    carregarVendedores();
+    
+    if (fs.existsSync(ARQUIVO_HISTORICO_SUCESSO)) {
+         fs.createReadStream(ARQUIVO_HISTORICO_SUCESSO)
+            .pipe(csv())
+            .on('data', (row) => { if(row.contrato) contratosAvisados.add(row.contrato); })
+            .on('end', () => {
+                console.log(`[SISTEMA] Histórico sincronizado.`);
+                
+                // PRIMEIRO RECUPERA, DEPOIS LIGA O FEEDBACK
+                recuperarMensagensAntigas().then(() => {
+                    setInterval(verificarConcluidosEConfirmar, 10000); 
+                });
+            });
+    } else {
+        recuperarMensagensAntigas().then(() => {
+            setInterval(verificarConcluidosEConfirmar, 10000);
+        });
+    }
+});
+
+client.on('message_create', async (msg) => {
+    if (!sistemaIniciado) return;
+    await processarMensagem(msg);
 });
 
 client.initialize();
