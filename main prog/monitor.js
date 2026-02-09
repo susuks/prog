@@ -7,25 +7,17 @@ const csv = require('csv-parser');
 const NOME_GRUPO_ALVO = 'VENDAS'; 
 const ARQUIVO_VENDEDORES = 'vendedores.csv';
 const ARQUIVO_FILA = 'fila_vendas.csv'; 
-// O Monitor agora LÊ este arquivo, mas quem escreve é o Python
 const ARQUIVO_HISTORICO_SUCESSO = 'historico_concluidos.csv'; 
 
 let mapaVendedores = {};
-let sistemaIniciado = false; // Trava para evitar duplo start
+let contratosAvisados = new Set(); // Memória RAM para não repetir aviso
+let sistemaIniciado = false;
 
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: { 
-        headless: false,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--disable-gpu'
-        ]
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu']
     }
 });
 
@@ -43,40 +35,63 @@ function carregarVendedores() {
                     if (tel && nome) mapaVendedores[tel] = nome;
                 } catch (e) {}
             })
-            .on('end', () => {
-                console.log(`[SISTEMA] ${Object.keys(mapaVendedores).length} vendedores carregados.`);
-                // Só inicia a recuperação depois de carregar os nomes
-                recuperarMensagensAntigas();
-            });
-    } else {
-        console.log('[AVISO] Arquivo vendedores.csv não encontrado.');
+            .on('end', () => console.log(`[SISTEMA] ${Object.keys(mapaVendedores).length} vendedores carregados.`));
     }
 }
 
 function contratoJaProcessado(contrato) {
-    // 1. Verifica se já foi concluído pelo Python (Histórico Definitivo)
-    if (fs.existsSync(ARQUIVO_HISTORICO_SUCESSO)) {
-        const historico = fs.readFileSync(ARQUIVO_HISTORICO_SUCESSO, 'utf-8');
-        if (historico.includes(contrato)) return true;
-    }
-    
-    // 2. Verifica se já está na fila esperando (para não duplicar na fila)
     if (fs.existsSync(ARQUIVO_FILA)) {
         const fila = fs.readFileSync(ARQUIVO_FILA, 'utf-8');
         if (fila.includes(contrato)) return true;
     }
-
+    // Verifica se já está no histórico final (evita reprocessar antigos)
+    if (fs.existsSync(ARQUIVO_HISTORICO_SUCESSO)) {
+        const historico = fs.readFileSync(ARQUIVO_HISTORICO_SUCESSO, 'utf-8');
+        if (historico.includes(contrato)) return true;
+    }
     return false;
 }
 
 function salvarNaFila(dados) {
-    // Garante cabeçalho correto para o Python
+    // REQUISITO 3: Adicionei coluna 'telefone'
     if (!fs.existsSync(ARQUIVO_FILA)) {
-        fs.writeFileSync(ARQUIVO_FILA, "contrato,origem,vendedor,lance livre\n");
+        fs.writeFileSync(ARQUIVO_FILA, "contrato,origem,vendedor,lance livre,telefone\n");
     }
-    const linha = `${dados.contrato},${dados.origem},${dados.vendedor},${dados.lance}\n`;
+    const linha = `${dados.contrato},${dados.origem},${dados.vendedor},${dados.lance},${dados.telefone}\n`;
     fs.appendFileSync(ARQUIVO_FILA, linha);
-    console.log(`[FILA] 📥 Contrato ${dados.contrato} enviado para processamento.`);
+    console.log(`[FILA] 📥 Contrato ${dados.contrato} enviado para o Python.`);
+}
+
+// REQUISITO 3: Feedback Responsivo
+function verificarConcluidosEConfirmar() {
+    if (!fs.existsSync(ARQUIVO_HISTORICO_SUCESSO)) return;
+
+    // Lê o arquivo de concluídos
+    const stream = fs.createReadStream(ARQUIVO_HISTORICO_SUCESSO).pipe(csv());
+    
+    stream.on('data', async (row) => {
+        // Formato esperado do Python: contrato, planilha, data, vendedor_nome, vendedor_tel, status_pagamento
+        const contrato = row.contrato;
+        const telefone = row.vendedor_tel; 
+        const status = row.status_pagamento;
+
+        if (contrato && telefone && !contratosAvisados.has(contrato)) {
+            contratosAvisados.add(contrato); // Marca como avisado na memória
+
+            // Evita avisar contratos muito velhos (carregados na inicialização)
+            // Se quiser avisar só os de "agora", pode usar timestamp, mas por enquanto vamos avisar todos que aparecerem novos no arquivo
+            
+            try {
+                const chatId = `${telefone}@c.us`;
+                let msg = `✅ *Cadastro Confirmado!*\n\n📄 Contrato: ${contrato}\n📊 Planilha: Atualizada\n💰 Status: ${status}`;
+                
+                await client.sendMessage(chatId, msg);
+                console.log(`[FEEDBACK] Mensagem de confirmação enviada para ${telefone} sobre contrato ${contrato}`);
+            } catch (e) {
+                console.error(`[ERRO FEEDBACK] Não consegui enviar msg para ${telefone}: ${e.message}`);
+            }
+        }
+    });
 }
 
 function extrairDados(texto) {
@@ -86,8 +101,33 @@ function extrairDados(texto) {
     return null;
 }
 
-// --- LÓGICA DE PROCESSAMENTO CENTRALIZADA ---
-async function processarMensagem(msg) {
+// --- ROTINA PRINCIPAL ---
+
+client.on('qr', (qr) => qrcode.generate(qr, { small: true }));
+
+client.on('ready', () => {
+    if (sistemaIniciado) return;
+    sistemaIniciado = true;
+    console.log('\n>>> MONITOR V7.1 (RESPONSIVO) INICIADO <<<');
+    carregarVendedores();
+    
+    // Carrega o histórico atual na memória para não mandar msg de coisas velhas
+    if (fs.existsSync(ARQUIVO_HISTORICO_SUCESSO)) {
+         fs.createReadStream(ARQUIVO_HISTORICO_SUCESSO)
+            .pipe(csv())
+            .on('data', (row) => { if(row.contrato) contratosAvisados.add(row.contrato); })
+            .on('end', () => {
+                console.log(`[SISTEMA] Histórico sincronizado. Iniciando verificação de novos...`);
+                // Inicia o loop de verificação de feedback a cada 10 segundos
+                setInterval(verificarConcluidosEConfirmar, 10000); 
+            });
+    } else {
+        setInterval(verificarConcluidosEConfirmar, 10000);
+    }
+});
+
+client.on('message_create', async (msg) => {
+    if (!sistemaIniciado) return;
     try {
         if (msg.from === 'status@broadcast' || msg.from.includes('@lid')) return;
         
@@ -97,12 +137,9 @@ async function processarMensagem(msg) {
         let isGrupoAlvo = false;
         let isPrivado = !msg.from.includes('@g.us');
 
-        // Identificação rápida de grupo
         if (msg.from.includes('@g.us')) {
             const chat = await msg.getChat();
-            if (chat.name && chat.name.toUpperCase() === NOME_GRUPO_ALVO.toUpperCase()) {
-                isGrupoAlvo = true;
-            }
+            if (chat.name && chat.name.toUpperCase() === NOME_GRUPO_ALVO.toUpperCase()) isGrupoAlvo = true;
         }
 
         if (isGrupoAlvo || isPrivado) {
@@ -120,13 +157,11 @@ async function processarMensagem(msg) {
 
                 if (nomeVendedor !== "Desconhecido") {
                     dados.vendedor = nomeVendedor;
-                    
+                    dados.telefone = idAutor; // REQUISITO 3: Passando telefone
+
                     if (!contratoJaProcessado(dados.contrato)) {
                         console.log(`[NOVO] Vendedor: ${nomeVendedor} | Contrato: ${dados.contrato}`);
                         salvarNaFila(dados);
-                    } else {
-                        // Silencioso para não poluir o log na recuperação
-                        // console.log(`[DUPLICADO] ${dados.contrato} ignorado.`);
                     }
                 }
             }
@@ -134,59 +169,6 @@ async function processarMensagem(msg) {
     } catch (e) {
         console.error(`[ERRO MSG]: ${e.message}`);
     }
-}
-
-// --- RECUPERAÇÃO DE MENSAGENS ANTIGAS ---
-async function recuperarMensagensAntigas() {
-    console.log('\n>>> INICIANDO ROTINA DE RECUPERAÇÃO <<<');
-    console.log('Lendo as últimas 10 mensagens de cada vendedor cadastrado...');
-    
-    const atraso = ms => new Promise(resolve => setTimeout(resolve, ms));
-
-    for (const [telefone, nome] of Object.entries(mapaVendedores)) {
-        try {
-            // Monta o ID do contato (ex: 55679...@c.us)
-            const chatId = `${telefone}@c.us`;
-            const chat = await client.getChatById(chatId);
-            
-            // Busca as últimas 10 mensagens
-            const mensagens = await chat.fetchMessages({ limit: 10 });
-            
-            console.log(`   > Verificando ${nome} (${mensagens.length} msgs)...`);
-            
-            for (const msg of mensagens) {
-                await processarMensagem(msg);
-            }
-            
-            // Pequena pausa para não bloquear o WhatsApp
-            await atraso(500); 
-
-        } catch (erro) {
-            // Ignora erro se o chat não existir ou estiver vazio
-            // console.log(`   [INFO] Sem histórico acessível para ${nome}`);
-        }
-    }
-    console.log('>>> RECUPERAÇÃO CONCLUÍDA. MODO TEMPO REAL ATIVO. <<<\n');
-}
-
-// --- EVENTOS ---
-
-client.on('qr', (qr) => {
-    console.log('[SISTEMA] QR Code gerado!');
-    qrcode.generate(qr, { small: true });
-});
-
-client.on('ready', () => {
-    if (sistemaIniciado) return;
-    sistemaIniciado = true;
-
-    console.log('\n>>> MONITOR V7.0 (COM RECUPERAÇÃO) INICIADO <<<');
-    carregarVendedores();
-});
-
-client.on('message_create', async (msg) => {
-    if (!sistemaIniciado) return;
-    await processarMensagem(msg);
 });
 
 client.initialize();
