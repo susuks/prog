@@ -1,0 +1,30 @@
+# Dependências gigantes (não salvar, instalamos com npm install)
+node_modules/
+__pycache__/
+*.pyc
+
+# Sessões e Autenticação (NUNCA SUBIR ISSO)
+.wwebjs_auth/
+.wwebjs_cache/
+.wwebjs_auth_media/
+session-sessao-media/
+back/
+varios/
+
+# Credenciais e Configurações Pessoais
+credentials.json
+config.txt
+sticker_id.txt
+sticker_pronto.webp
+historico_ids.txt
+back.rar
+
+
+# Arquivos temporários e de log
+*.log
+temp_processando.csv
+erro_site.png
+
+# Arquivos do sistema
+.DS_Store
+Thumbs.db

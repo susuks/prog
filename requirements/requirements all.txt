@@ -1,0 +1,14 @@
+python
+
+selenium 
+webdriver-manager 
+pandas 
+gspread 
+oauth2client
+
+node.js
+
+whatsapp-web.js
+qrcode-terminal
+csv-writer
+csv-parser
