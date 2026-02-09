@@ -5,7 +5,7 @@ const csv = require('csv-parser');
 
 const NOME_GRUPO_ALVO = 'VENDAS'; 
 const NUMERO_DESTINO_BRUTO = '556792656340'; 
-const ARQUIVO_VENDEDORES = 'vendedores.csv'; // Corrigido para arquivo padrão
+const ARQUIVO_VENDEDORES = 'vendedores enc.csv'; // Corrigido para arquivo padrão
 const ARQUIVO_STICKER_ID = 'sticker_id.txt';
 
 let MENSAGEM_STICKER_PADRAO = null;
