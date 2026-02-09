@@ -23,20 +23,43 @@ const client = new Client({
 
 // --- FUNÇÕES AUXILIARES ---
 
+// NOVA FUNÇÃO: Remove sufixos como :83 ou :2 que estragam o número
+function limparIdUsuario(rawId) {
+    if (!rawId) return "";
+    // 1. Pega apenas o que vem antes do @ (ex: 556799998888:83@c.us -> 556799998888:83)
+    let userPart = rawId.split('@')[0];
+    // 2. Pega apenas o que vem antes de : (ex: 556799998888:83 -> 556799998888)
+    let cleanNumber = userPart.split(':')[0];
+    // 3. Garante que só tem números
+    return cleanNumber.replace(/\D/g, '');
+}
+
 function carregarVendedores() {
-    mapaVendedores = {};
-    if (fs.existsSync(ARQUIVO_VENDEDORES)) {
-        fs.createReadStream(ARQUIVO_VENDEDORES)
-            .pipe(csv())
-            .on('data', (row) => {
-                try {
-                    const tel = (row.telefone || row.Telefone) ? (row.telefone || row.Telefone).replace(/\D/g, '') : null;
-                    const nome = row.nome_planilha || row.nome || row.Nome;
-                    if (tel && nome) mapaVendedores[tel] = nome;
-                } catch (e) {}
-            })
-            .on('end', () => console.log(`[SISTEMA] ${Object.keys(mapaVendedores).length} vendedores carregados.`));
-    }
+    return new Promise((resolve, reject) => {
+        mapaVendedores = {};
+        if (fs.existsSync(ARQUIVO_VENDEDORES)) {
+            fs.createReadStream(ARQUIVO_VENDEDORES)
+                .pipe(csv())
+                .on('data', (row) => {
+                    try {
+                        const tel = (row.telefone || row.Telefone) ? (row.telefone || row.Telefone).replace(/\D/g, '') : null;
+                        const nome = row.nome_planilha || row.nome || row.Nome;
+                        if (tel && nome) mapaVendedores[tel] = nome;
+                    } catch (e) {}
+                })
+                .on('end', () => {
+                    console.log(`[SISTEMA] ${Object.keys(mapaVendedores).length} vendedores carregados.`);
+                    resolve(true); 
+                })
+                .on('error', (err) => {
+                    console.log('[ERRO] Falha ao ler CSV vendedores.');
+                    resolve(false); 
+                });
+        } else {
+            console.log('[AVISO] Arquivo vendedores.csv não encontrado.');
+            resolve(false);
+        }
+    });
 }
 
 function contratoJaProcessado(contrato) {
@@ -67,20 +90,31 @@ function verificarConcluidosEConfirmar() {
     
     stream.on('data', async (row) => {
         const contrato = row.contrato;
-        const telefone = row.vendedor_tel || row['número'] || row.numero; 
+        let telefoneRaw = row.vendedor_tel || row['número'] || row.numero; 
         const status = row.status_pagamento || row['1º paga'];
 
         if (contrato && !contratosAvisados.has(contrato)) {
-            if (telefone) {
+            if (telefoneRaw) {
                 contratosAvisados.add(contrato);
                 try {
-                    const chatId = `${telefone.replace(/\D/g, '')}@c.us`; 
-                    let msg = `✅ *Cadastro Confirmado!*\n\n📄 Contrato: ${contrato}\n📊 Planilha: Atualizada\n💰 Status: ${status}`;
+                    // Limpeza extra também no feedback, por segurança
+                    let numeroLimpo = limparIdUsuario(telefoneRaw + "@c.us"); 
+
+                    // Adiciona 55 se parecer número BR sem DDI (10 ou 11 dígitos)
+                    if (numeroLimpo.length >= 10 && numeroLimpo.length <= 11) numeroLimpo = '55' + numeroLimpo; 
+
+                    const idValidado = await client.getNumberId(numeroLimpo);
                     
-                    await client.sendMessage(chatId, msg);
-                    console.log(`[FEEDBACK] ✅ Mensagem enviada para ${telefone} (Contrato: ${contrato})`);
+                    if (idValidado) {
+                        const chatId = idValidado._serialized;
+                        let msg = `✅ *Cadastro Confirmado!*\n\n📄 Contrato: ${contrato}\n📊 Planilha: Atualizada\n💰 Status: ${status}`;
+                        await client.sendMessage(chatId, msg);
+                        console.log(`[FEEDBACK] ✅ Mensagem enviada para ${numeroLimpo}`);
+                    } else {
+                        console.log(`[ERRO FEEDBACK] WhatsApp não reconhece o número: ${numeroLimpo} (Original: ${telefoneRaw})`);
+                    }
                 } catch (e) {
-                    console.error(`[ERRO FEEDBACK] Falha ao enviar para ${telefone}: ${e.message}`);
+                    console.error(`[ERRO FEEDBACK] Falha técnica: ${e.message}`);
                 }
             } 
         }
@@ -94,7 +128,6 @@ function extrairDados(texto) {
     return null;
 }
 
-// --- FUNÇÃO DE PROCESSAMENTO CENTRAL (Usada em tempo real e na recuperação) ---
 async function processarMensagem(msg) {
     try {
         if (msg.from === 'status@broadcast' || msg.from.includes('@lid')) return;
@@ -113,7 +146,9 @@ async function processarMensagem(msg) {
         if (isGrupoAlvo || isPrivado) {
             const dados = extrairDados(corpoMsg);
             if (dados) {
-                let idAutor = (msg.author || msg.from).replace(/\D/g, '');
+                // CORREÇÃO: Usando a nova função de limpeza cirúrgica
+                let idAutor = limparIdUsuario(msg.author || msg.from);
+                
                 let nomeVendedor = "Desconhecido";
 
                 for (let tel in mapaVendedores) {
@@ -139,7 +174,6 @@ async function processarMensagem(msg) {
     }
 }
 
-// --- ROTINA DE RECUPERAÇÃO (RESTAURADA) ---
 async function recuperarMensagensAntigas() {
     console.log('\n>>> INICIANDO ROTINA DE RECUPERAÇÃO <<<');
     console.log('Lendo as últimas 10 mensagens de cada vendedor cadastrado...');
@@ -159,38 +193,35 @@ async function recuperarMensagensAntigas() {
             }
             await atraso(500); 
         } catch (erro) {
-            // Ignora se chat não existir
+            // Ignora chat inexistente
         }
     }
     console.log('>>> RECUPERAÇÃO CONCLUÍDA. MODO TEMPO REAL ATIVO. <<<\n');
 }
 
-// --- ROTINA PRINCIPAL ---
+// --- EVENTOS ---
 
 client.on('qr', (qr) => qrcode.generate(qr, { small: true }));
 
-client.on('ready', () => {
+client.on('ready', async () => {
     if (sistemaIniciado) return;
     sistemaIniciado = true;
-    console.log('\n>>> MONITOR V7.2 (RESPONSIVO + RECUPERAÇÃO) INICIADO <<<');
-    carregarVendedores();
+    console.log('\n>>> MONITOR V7.4 (CORREÇÃO DE ID) INICIADO <<<');
     
+    await carregarVendedores();
+
     if (fs.existsSync(ARQUIVO_HISTORICO_SUCESSO)) {
          fs.createReadStream(ARQUIVO_HISTORICO_SUCESSO)
             .pipe(csv())
             .on('data', (row) => { if(row.contrato) contratosAvisados.add(row.contrato); })
-            .on('end', () => {
+            .on('end', async () => {
                 console.log(`[SISTEMA] Histórico sincronizado.`);
-                
-                // PRIMEIRO RECUPERA, DEPOIS LIGA O FEEDBACK
-                recuperarMensagensAntigas().then(() => {
-                    setInterval(verificarConcluidosEConfirmar, 10000); 
-                });
+                await recuperarMensagensAntigas();
+                setInterval(verificarConcluidosEConfirmar, 10000); 
             });
     } else {
-        recuperarMensagensAntigas().then(() => {
-            setInterval(verificarConcluidosEConfirmar, 10000);
-        });
+        await recuperarMensagensAntigas();
+        setInterval(verificarConcluidosEConfirmar, 10000);
     }
 });
 

@@ -5,7 +5,7 @@ import gspread
 import shutil
 import re
 import json
-import winsound # Para fazer o BIP
+import winsound
 from datetime import datetime
 import pandas as pd
 from oauth2client.service_account import ServiceAccountCredentials
@@ -23,11 +23,9 @@ ARQUIVO_HISTORICO_SUCESSO = 'historico_concluidos.csv'
 ARQUIVO_PENDENTES = 'pendentes_reanalise.json'
 ARQUIVO_CONFIG = 'config.txt'
 
-# --- CONFIGURAÇÕES DE REANÁLISE ---
 INTERVALO_REANALISE_SEGUNDOS = 7200 # 2 Horas
 MAX_TENTATIVAS = 10
 
-# --- FUNÇÃO PARA LER CONFIGURAÇÕES ---
 def carregar_configuracoes():
     config = {
         "MATRICULA": "",
@@ -52,18 +50,15 @@ SENHA_LOGIN = CONFIG.get("SENHA") if CONFIG else ""
 PREFIXO_PLANILHA = CONFIG.get("PREFIXO_PLANILHA") if CONFIG else ""
 NOME_ABA = CONFIG.get("NOME_ABA") if CONFIG else ""
 
-# --- GERENCIAMENTO DE REANÁLISE (JSON) ---
 def carregar_pendentes():
     if os.path.exists(ARQUIVO_PENDENTES):
         try:
-            with open(ARQUIVO_PENDENTES, 'r') as f:
-                return json.load(f)
+            with open(ARQUIVO_PENDENTES, 'r') as f: return json.load(f)
         except: return {}
     return {}
 
 def salvar_pendentes(dados):
-    with open(ARQUIVO_PENDENTES, 'w') as f:
-        json.dump(dados, f, indent=4)
+    with open(ARQUIVO_PENDENTES, 'w') as f: json.dump(dados, f, indent=4)
 
 def adicionar_para_reanalise(contrato, vendedor_nome, vendedor_tel, nome_planilha, origem, dados_completos):
     pendentes = carregar_pendentes()
@@ -78,8 +73,6 @@ def adicionar_para_reanalise(contrato, vendedor_nome, vendedor_tel, nome_planilh
     }
     salvar_pendentes(pendentes)
     print(f"   [AGENDADO] Contrato {contrato} agendado para reanálise em 2 horas.")
-
-# --- GOOGLE SHEETS E ARQUIVOS ---
 
 def salvar_historico_concluido(contrato, nome_planilha, vendedor_nome, vendedor_tel, status_pag):
     existe = os.path.exists(ARQUIVO_HISTORICO_SUCESSO)
@@ -116,8 +109,6 @@ def encontrar_proxima_linha_vazia(sheet):
         except: return i + 1
     return 12
 
-# --- NAVEGAÇÃO E EXTRAÇÃO ---
-
 def limpar_valor(texto):
     try:
         match = re.search(r'([\d\.]+,\d{2})', str(texto))
@@ -146,14 +137,9 @@ def fazer_login_automatico(driver):
         WebDriverWait(driver, 600).until(EC.frame_to_be_available_and_switch_to_it((By.NAME, "mainFrame")))
         driver.switch_to.default_content()
         
-        # --- AVISO SONORO E VISUAL ---
-        print("\n" + "#"*60)
-        print(" SUCESSO! LOGIN DETECTADO. O ROBÔ ESTÁ OPERANDO.")
-        print("#"*60 + "\n")
-        try: winsound.Beep(1000, 500) # Frequencia 1000Hz, 500ms
+        print("\n LOGIN DETECTADO!")
+        try: winsound.Beep(1000, 500) 
         except: pass
-        # -----------------------------
-        
         return True
     except: return False
 
@@ -204,22 +190,27 @@ def extrair_dados_e_pagamento(driver):
     try: dados['cota'] = driver.find_element(By.XPATH, "//td[contains(text(), 'Cota:')]/following-sibling::td").text.strip()
     except: pass
     
-    # Telefone
+    # 1. TENTA EXTRAIR TELEFONE NA ABA TELEFONES
     try:
         driver.find_element(By.XPATH, "//*[contains(text(), 'Telefones')]").click()
         time.sleep(1.5)
-        dados['telefone'] = driver.find_element(By.XPATH, "//table//tr[2]/td[2]").text.strip()
-    except: pass
+        # CORREÇÃO: XPath específico para Celular, evitando pegar cabeçalho
+        xpath_celular = "//td[contains(text(), 'Celular')]/parent::tr/td[2]"
+        dados['telefone'] = driver.find_element(By.XPATH, xpath_celular).text.strip()
+    except: 
+        # Fallback se falhar
+        pass
 
-    # REQUISITO 1 (Corrigido): Voltar para a aba principal correta (Consorciado)
+    # 2. VOLTA OBRIGATORIAMENTE PARA A ABA COTA (CORRIGIDO)
     try:
-        driver.find_element(By.LINK_TEXT, "Consorciado").click() # Clica na aba exata
+        # Tenta clicar em "Cota"
+        driver.find_element(By.LINK_TEXT, "Cota").click()
         time.sleep(1)
     except: 
-        # Fallback se link text falhar
-        try: driver.find_element(By.XPATH, "//a[contains(text(), 'Consorciado')]").click()
+        try: driver.find_element(By.XPATH, "//a[contains(text(), 'Cota')]").click()
         except: pass
 
+    # 3. AGORA NA ABA COTA, LE O PAGAMENTO
     try:
         valor_pago = 0
         try:
@@ -253,8 +244,6 @@ def atualizar_planilha(sheet, row_csv, dados_site, contrato):
     sheet.update(range_name=f"J{linha}:O{linha}", values=[p2], value_input_option='USER_ENTERED')
     
     return status_pag
-
-# --- LOOP PRINCIPAL ---
 
 def loop_servico():
     print(">>> SERVIÇO DE COLETA E REANÁLISE INICIADO <<<")
