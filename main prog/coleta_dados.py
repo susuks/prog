@@ -25,6 +25,7 @@ ARQUIVO_CONFIG = 'config.txt'
 
 INTERVALO_REANALISE_SEGUNDOS = 7200 # 2 Horas
 MAX_TENTATIVAS = 10
+TEMPO_INATIVIDADE_MAXIMO = 300 # 5 Minutos para o Keep-Alive
 
 def carregar_configuracoes():
     config = {
@@ -194,23 +195,19 @@ def extrair_dados_e_pagamento(driver):
     try:
         driver.find_element(By.XPATH, "//*[contains(text(), 'Telefones')]").click()
         time.sleep(1.5)
-        # CORREÇÃO: XPath específico para Celular, evitando pegar cabeçalho
         xpath_celular = "//td[contains(text(), 'Celular')]/parent::tr/td[2]"
         dados['telefone'] = driver.find_element(By.XPATH, xpath_celular).text.strip()
-    except: 
-        # Fallback se falhar
-        pass
+    except: pass
 
-    # 2. VOLTA OBRIGATORIAMENTE PARA A ABA COTA (CORRIGIDO)
+    # 2. VOLTA OBRIGATORIAMENTE PARA A ABA COTA
     try:
-        # Tenta clicar em "Cota"
         driver.find_element(By.LINK_TEXT, "Cota").click()
         time.sleep(1)
     except: 
         try: driver.find_element(By.XPATH, "//a[contains(text(), 'Cota')]").click()
         except: pass
 
-    # 3. AGORA NA ABA COTA, LE O PAGAMENTO
+    # 3. LE O PAGAMENTO
     try:
         valor_pago = 0
         try:
@@ -245,16 +242,33 @@ def atualizar_planilha(sheet, row_csv, dados_site, contrato):
     
     return status_pag
 
+# --- FUNÇÃO KEEP ALIVE ---
+def manter_sessao_viva(driver):
+    try:
+        driver.switch_to.default_content()
+        WebDriverWait(driver, 5).until(EC.frame_to_be_available_and_switch_to_it((By.NAME, "mainFrame")))
+        WebDriverWait(driver, 5).until(EC.frame_to_be_available_and_switch_to_it((By.NAME, "LeftFrame")))
+        driver.find_element(By.LINK_TEXT, "Consorciado").click()
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Keep-Alive: Sessão renovada.")
+        return True
+    except:
+        return False
+
 def loop_servico():
     print(">>> SERVIÇO DE COLETA E REANÁLISE INICIADO <<<")
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
     if not fazer_login_automatico(driver): return
 
+    ultimo_keep_alive = time.time()
+
     while True:
         try:
+            # 1. PROCESSAMENTO DE NOVOS
             if os.path.exists(ARQUIVO_FILA):
                 try: shutil.move(ARQUIVO_FILA, ARQUIVO_EM_PROCESSAMENTO)
                 except: time.sleep(1); continue
+
+                ultimo_keep_alive = time.time() # Reseta timer (atividade detectada)
 
                 try:
                     df = pd.read_csv(ARQUIVO_EM_PROCESSAMENTO, sep=',', dtype=str)
@@ -296,6 +310,7 @@ def loop_servico():
 
                 if os.path.exists(ARQUIVO_EM_PROCESSAMENTO): os.remove(ARQUIVO_EM_PROCESSAMENTO)
 
+            # 2. REANÁLISE PERIÓDICA
             pendentes = carregar_pendentes()
             agora = time.time()
             mudou_pendentes = False
@@ -303,6 +318,7 @@ def loop_servico():
 
             for contrato, info in lista_pendentes:
                 if agora >= info['proxima_verificacao']:
+                    ultimo_keep_alive = time.time() # Reseta timer (atividade detectada)
                     print(f"\n[REANÁLISE] Verificando {contrato} (Tentativa {info['tentativas']+1}/{MAX_TENTATIVAS})...")
                     
                     if buscar_contrato(driver, contrato):
@@ -328,6 +344,13 @@ def loop_servico():
             
             if mudou_pendentes:
                 salvar_pendentes(pendentes)
+
+            # 3. KEEP ALIVE (SÓ SE ESTIVER OCIOSO)
+            if (time.time() - ultimo_keep_alive) > TEMPO_INATIVIDADE_MAXIMO:
+                if not manter_sessao_viva(driver):
+                    print("[ERRO] Sessão perdida. Tentando relogar...") 
+                    fazer_login_automatico(driver)
+                ultimo_keep_alive = time.time()
 
             time.sleep(5) 
 
