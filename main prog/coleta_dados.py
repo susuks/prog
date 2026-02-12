@@ -23,9 +23,10 @@ ARQUIVO_HISTORICO_SUCESSO = 'historico_concluidos.csv'
 ARQUIVO_PENDENTES = 'pendentes_reanalise.json'
 ARQUIVO_CONFIG = 'config.txt'
 
-INTERVALO_REANALISE_SEGUNDOS = 7200 # 2 Horas
+# --- CONFIGURAÇÕES ---
+INTERVALO_REANALISE_SEGUNDOS = 60 # 1 Minuto (Conforme pedido)
 MAX_TENTATIVAS = 10
-TEMPO_INATIVIDADE_MAXIMO = 300 # 5 Minutos para o Keep-Alive
+TEMPO_INATIVIDADE_MAXIMO = 300 # 5 Minutos (Keep Alive)
 
 def carregar_configuracoes():
     config = {
@@ -73,7 +74,7 @@ def adicionar_para_reanalise(contrato, vendedor_nome, vendedor_tel, nome_planilh
         "proxima_verificacao": time.time() + INTERVALO_REANALISE_SEGUNDOS
     }
     salvar_pendentes(pendentes)
-    print(f"   [AGENDADO] Contrato {contrato} agendado para reanálise em 2 horas.")
+    print(f"   [AGENDADO] Contrato {contrato} agendado para reanálise em 1 minuto.")
 
 def salvar_historico_concluido(contrato, nome_planilha, vendedor_nome, vendedor_tel, status_pag):
     existe = os.path.exists(ARQUIVO_HISTORICO_SUCESSO)
@@ -177,7 +178,32 @@ def buscar_contrato(driver, contrato):
     except:
         return False
 
-def extrair_dados_e_pagamento(driver):
+# --- NOVA FUNÇÃO LEVE: SÓ CHECA PAGAMENTO ---
+def verificar_apenas_pagamento(driver):
+    # Assume que já buscou o contrato e está na tela inicial dele
+    try:
+        # 1. Clica direto na aba COTA
+        driver.find_element(By.LINK_TEXT, "Cota").click()
+        time.sleep(1)
+    except: 
+        try: driver.find_element(By.XPATH, "//a[contains(text(), 'Cota')]").click()
+        except: pass
+
+    # 2. Lê pagamento
+    try:
+        valor_pago = 0
+        try:
+            elem = driver.find_element(By.XPATH, "/html/body/table[8]/tbody/tr[25]/td[2]/span")
+            valor_pago = limpar_valor(elem.text)
+        except:
+            elem = driver.find_element(By.XPATH, "//td[contains(text(), 'Parcelas Pagas:')]/following-sibling::td")
+            valor_pago = limpar_valor(elem.text)
+        
+        return (valor_pago > 0)
+    except: 
+        return False
+
+def extrair_dados_completos(driver):
     dados = {'credito': 0.00, 'nome': '-', 'telefone': '-', 'data_venda': '', 'grupo': '-', 'cota': '-', 'pago': False}
     
     try: dados['nome'] = driver.find_element(By.XPATH, "//td[contains(text(), 'Consorciado:')]/following-sibling::td").text
@@ -191,7 +217,6 @@ def extrair_dados_e_pagamento(driver):
     try: dados['cota'] = driver.find_element(By.XPATH, "//td[contains(text(), 'Cota:')]/following-sibling::td").text.strip()
     except: pass
     
-    # 1. TENTA EXTRAIR TELEFONE NA ABA TELEFONES
     try:
         driver.find_element(By.XPATH, "//*[contains(text(), 'Telefones')]").click()
         time.sleep(1.5)
@@ -199,7 +224,6 @@ def extrair_dados_e_pagamento(driver):
         dados['telefone'] = driver.find_element(By.XPATH, xpath_celular).text.strip()
     except: pass
 
-    # 2. VOLTA OBRIGATORIAMENTE PARA A ABA COTA
     try:
         driver.find_element(By.LINK_TEXT, "Cota").click()
         time.sleep(1)
@@ -207,7 +231,6 @@ def extrair_dados_e_pagamento(driver):
         try: driver.find_element(By.XPATH, "//a[contains(text(), 'Cota')]").click()
         except: pass
 
-    # 3. LE O PAGAMENTO
     try:
         valor_pago = 0
         try:
@@ -217,10 +240,8 @@ def extrair_dados_e_pagamento(driver):
             elem = driver.find_element(By.XPATH, "//td[contains(text(), 'Parcelas Pagas:')]/following-sibling::td")
             valor_pago = limpar_valor(elem.text)
         
-        if valor_pago > 0:
-            dados['pago'] = True
-    except: 
-        dados['pago'] = False
+        if valor_pago > 0: dados['pago'] = True
+    except: dados['pago'] = False
 
     return dados
 
@@ -242,7 +263,6 @@ def atualizar_planilha(sheet, row_csv, dados_site, contrato):
     
     return status_pag
 
-# --- FUNÇÃO KEEP ALIVE ---
 def manter_sessao_viva(driver):
     try:
         driver.switch_to.default_content()
@@ -251,11 +271,10 @@ def manter_sessao_viva(driver):
         driver.find_element(By.LINK_TEXT, "Consorciado").click()
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Keep-Alive: Sessão renovada.")
         return True
-    except:
-        return False
+    except: return False
 
 def loop_servico():
-    print(">>> SERVIÇO DE COLETA E REANÁLISE INICIADO <<<")
+    print(">>> SERVIÇO DE COLETA E REANÁLISE (MODO TURBO) <<<")
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
     if not fazer_login_automatico(driver): return
 
@@ -263,12 +282,12 @@ def loop_servico():
 
     while True:
         try:
-            # 1. PROCESSAMENTO DE NOVOS
+            # 1. PROCESSAMENTO DE NOVOS (COMPLETO)
             if os.path.exists(ARQUIVO_FILA):
                 try: shutil.move(ARQUIVO_FILA, ARQUIVO_EM_PROCESSAMENTO)
                 except: time.sleep(1); continue
 
-                ultimo_keep_alive = time.time() # Reseta timer (atividade detectada)
+                ultimo_keep_alive = time.time()
 
                 try:
                     df = pd.read_csv(ARQUIVO_EM_PROCESSAMENTO, sep=',', dtype=str)
@@ -293,7 +312,7 @@ def loop_servico():
                         continue
 
                     if buscar_contrato(driver, contrato):
-                        dados = extrair_dados_e_pagamento(driver)
+                        dados = extrair_dados_completos(driver) # Processo lento e completo
                         
                         status_final = atualizar_planilha(sheet, row, dados, contrato)
                         
@@ -310,7 +329,7 @@ def loop_servico():
 
                 if os.path.exists(ARQUIVO_EM_PROCESSAMENTO): os.remove(ARQUIVO_EM_PROCESSAMENTO)
 
-            # 2. REANÁLISE PERIÓDICA
+            # 2. REANÁLISE (RÁPIDA)
             pendentes = carregar_pendentes()
             agora = time.time()
             mudou_pendentes = False
@@ -318,17 +337,20 @@ def loop_servico():
 
             for contrato, info in lista_pendentes:
                 if agora >= info['proxima_verificacao']:
-                    ultimo_keep_alive = time.time() # Reseta timer (atividade detectada)
+                    ultimo_keep_alive = time.time()
                     print(f"\n[REANÁLISE] Verificando {contrato} (Tentativa {info['tentativas']+1}/{MAX_TENTATIVAS})...")
                     
                     if buscar_contrato(driver, contrato):
-                        dados = extrair_dados_e_pagamento(driver)
+                        # AQUI ESTÁ A OTIMIZAÇÃO: Usa função rápida
+                        pagou = verificar_apenas_pagamento(driver)
                         
-                        if dados['pago']:
+                        if pagou:
                             print("   [PAGAMENTO DETECTADO] Atualizando planilha...")
                             sheet = conectar_google_sheets(info['nome_planilha'])
                             if sheet:
-                                atualizar_planilha(sheet, info['dados_originais'], dados, contrato)
+                                # Reconstrói o objeto 'dados' apenas com o necessário
+                                dados_fake = {'pago': True} 
+                                atualizar_planilha(sheet, info['dados_originais'], dados_fake, contrato)
                                 salvar_historico_concluido(contrato, info['nome_planilha'], info['vendedor_nome'], info['vendedor_tel'], "1º Parcela Paga (Reanálise)")
                                 del pendentes[contrato]
                                 mudou_pendentes = True
@@ -336,7 +358,7 @@ def loop_servico():
                             print("   [AINDA NÃO PAGO] Reagendando...")
                             info['tentativas'] += 1
                             if info['tentativas'] >= MAX_TENTATIVAS:
-                                print("   [EXPIROU] Máximo de tentativas atingido.")
+                                print("   [EXPIROU] Desistindo.")
                                 del pendentes[contrato]
                             else:
                                 info['proxima_verificacao'] = agora + INTERVALO_REANALISE_SEGUNDOS
@@ -345,10 +367,10 @@ def loop_servico():
             if mudou_pendentes:
                 salvar_pendentes(pendentes)
 
-            # 3. KEEP ALIVE (SÓ SE ESTIVER OCIOSO)
+            # 3. KEEP ALIVE
             if (time.time() - ultimo_keep_alive) > TEMPO_INATIVIDADE_MAXIMO:
                 if not manter_sessao_viva(driver):
-                    print("[ERRO] Sessão perdida. Tentando relogar...") 
+                    print("[ERRO] Sessão perdida.") 
                     fazer_login_automatico(driver)
                 ultimo_keep_alive = time.time()
 

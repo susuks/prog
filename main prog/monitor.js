@@ -10,7 +10,7 @@ const ARQUIVO_FILA = 'fila_vendas.csv';
 const ARQUIVO_HISTORICO_SUCESSO = 'historico_concluidos.csv'; 
 
 let mapaVendedores = {};
-let contratosAvisados = new Set(); 
+let contratosAvisados = new Set(); // Apenas para feedback (msg de whats), não para lógica de bloqueio
 let sistemaIniciado = false;
 
 const client = new Client({
@@ -23,14 +23,10 @@ const client = new Client({
 
 // --- FUNÇÕES AUXILIARES ---
 
-// NOVA FUNÇÃO: Remove sufixos como :83 ou :2 que estragam o número
 function limparIdUsuario(rawId) {
     if (!rawId) return "";
-    // 1. Pega apenas o que vem antes do @ (ex: 556799998888:83@c.us -> 556799998888:83)
     let userPart = rawId.split('@')[0];
-    // 2. Pega apenas o que vem antes de : (ex: 556799998888:83 -> 556799998888)
     let cleanNumber = userPart.split(':')[0];
-    // 3. Garante que só tem números
     return cleanNumber.replace(/\D/g, '');
 }
 
@@ -50,10 +46,6 @@ function carregarVendedores() {
                 .on('end', () => {
                     console.log(`[SISTEMA] ${Object.keys(mapaVendedores).length} vendedores carregados.`);
                     resolve(true); 
-                })
-                .on('error', (err) => {
-                    console.log('[ERRO] Falha ao ler CSV vendedores.');
-                    resolve(false); 
                 });
         } else {
             console.log('[AVISO] Arquivo vendedores.csv não encontrado.');
@@ -63,10 +55,12 @@ function carregarVendedores() {
 }
 
 function contratoJaProcessado(contrato) {
+    // 1. Verifica se está na fila (Aguardando processamento)
     if (fs.existsSync(ARQUIVO_FILA)) {
         const fila = fs.readFileSync(ARQUIVO_FILA, 'utf-8');
         if (fila.includes(contrato)) return true;
     }
+    // 2. Verifica se está no histórico (Concluído) - LÊ O ARQUIVO AGORA (SEM MEMÓRIA CACHE)
     if (fs.existsSync(ARQUIVO_HISTORICO_SUCESSO)) {
         const historico = fs.readFileSync(ARQUIVO_HISTORICO_SUCESSO, 'utf-8');
         if (historico.includes(contrato)) return true;
@@ -95,12 +89,9 @@ function verificarConcluidosEConfirmar() {
 
         if (contrato && !contratosAvisados.has(contrato)) {
             if (telefoneRaw) {
-                contratosAvisados.add(contrato);
+                contratosAvisados.add(contrato); // Memória apenas para não spamar mensagem repetida
                 try {
-                    // Limpeza extra também no feedback, por segurança
                     let numeroLimpo = limparIdUsuario(telefoneRaw + "@c.us"); 
-
-                    // Adiciona 55 se parecer número BR sem DDI (10 ou 11 dígitos)
                     if (numeroLimpo.length >= 10 && numeroLimpo.length <= 11) numeroLimpo = '55' + numeroLimpo; 
 
                     const idValidado = await client.getNumberId(numeroLimpo);
@@ -110,11 +101,9 @@ function verificarConcluidosEConfirmar() {
                         let msg = `✅ *Cadastro Confirmado!*\n\n📄 Contrato: ${contrato}\n📊 Planilha: Atualizada\n💰 Status: ${status}`;
                         await client.sendMessage(chatId, msg);
                         console.log(`[FEEDBACK] ✅ Mensagem enviada para ${numeroLimpo}`);
-                    } else {
-                        console.log(`[ERRO FEEDBACK] WhatsApp não reconhece o número: ${numeroLimpo} (Original: ${telefoneRaw})`);
                     }
                 } catch (e) {
-                    console.error(`[ERRO FEEDBACK] Falha técnica: ${e.message}`);
+                    console.error(`[ERRO FEEDBACK] ${e.message}`);
                 }
             } 
         }
@@ -146,9 +135,7 @@ async function processarMensagem(msg) {
         if (isGrupoAlvo || isPrivado) {
             const dados = extrairDados(corpoMsg);
             if (dados) {
-                // CORREÇÃO: Usando a nova função de limpeza cirúrgica
                 let idAutor = limparIdUsuario(msg.author || msg.from);
-                
                 let nomeVendedor = "Desconhecido";
 
                 for (let tel in mapaVendedores) {
@@ -162,10 +149,17 @@ async function processarMensagem(msg) {
                     dados.vendedor = nomeVendedor;
                     dados.telefone = idAutor; 
 
+                    // CORREÇÃO: Lê o arquivo AGORA para ver se existe
                     if (!contratoJaProcessado(dados.contrato)) {
                         console.log(`[NOVO] Vendedor: ${nomeVendedor} | Contrato: ${dados.contrato}`);
                         salvarNaFila(dados);
+                    } else {
+                        // REQUISITO: Avisar duplicidade
+                        console.log(`[DUPLICADO] Contrato ${dados.contrato} recusado (já processado).`);
                     }
+                } else {
+                    // REQUISITO: Avisar não autorizado
+                    console.log(`[NEGADO] Mensagem válida, mas número ${idAutor} não está na lista de vendedores.`);
                 }
             }
         }
@@ -206,16 +200,16 @@ client.on('qr', (qr) => qrcode.generate(qr, { small: true }));
 client.on('ready', async () => {
     if (sistemaIniciado) return;
     sistemaIniciado = true;
-    console.log('\n>>> MONITOR V7.4 (CORREÇÃO DE ID) INICIADO <<<');
+    console.log('\n>>> MONITOR V7.5 (SEM MEMÓRIA CACHE + LOGS) INICIADO <<<');
     
     await carregarVendedores();
 
+    // Sincroniza apenas para feedback (não repetir msg de sucesso), mas não bloqueia a lógica
     if (fs.existsSync(ARQUIVO_HISTORICO_SUCESSO)) {
          fs.createReadStream(ARQUIVO_HISTORICO_SUCESSO)
             .pipe(csv())
             .on('data', (row) => { if(row.contrato) contratosAvisados.add(row.contrato); })
             .on('end', async () => {
-                console.log(`[SISTEMA] Histórico sincronizado.`);
                 await recuperarMensagensAntigas();
                 setInterval(verificarConcluidosEConfirmar, 10000); 
             });
