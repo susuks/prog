@@ -24,9 +24,9 @@ ARQUIVO_PENDENTES = 'pendentes_reanalise.json'
 ARQUIVO_CONFIG = 'config.txt'
 
 # --- CONFIGURAÇÕES ---
-INTERVALO_REANALISE_SEGUNDOS = 60 # 1 Minuto (Conforme pedido)
-MAX_TENTATIVAS = 10
-TEMPO_INATIVIDADE_MAXIMO = 300 # 5 Minutos (Keep Alive)
+INTERVALO_REANALISE_SEGUNDOS = 60 # 1 Minuto
+MAX_TENTATIVAS = 300
+TEMPO_INATIVIDADE_MAXIMO = 300 # 5 Minutos
 
 def carregar_configuracoes():
     config = {
@@ -111,6 +111,25 @@ def encontrar_proxima_linha_vazia(sheet):
         except: return i + 1
     return 12
 
+# NOVA FUNÇÃO: Procura a linha exata do contrato na planilha
+def encontrar_linha_do_contrato(sheet, contrato):
+    try:
+        # A Coluna M é a 13ª coluna da planilha onde o contrato é salvo
+        coluna_m = sheet.col_values(13)
+        # Varre a coluna procurando o número (enumerate começa no 1 para bater com a linha da planilha)
+        for i, valor in enumerate(coluna_m, start=1):
+            if str(contrato).strip() == str(valor).strip():
+                return i # Retorna o número da linha
+    except Exception as e:
+        print(f"   [ERRO BUSCA PLANILHA] {e}")
+    return None
+
+def limpar_inteiro(texto):
+    try:
+        numeros = re.sub(r'\D', '', str(texto))
+        return int(numeros) if numeros else 0
+    except: return 0
+
 def limpar_valor(texto):
     try:
         match = re.search(r'([\d\.]+,\d{2})', str(texto))
@@ -178,27 +197,10 @@ def buscar_contrato(driver, contrato):
     except:
         return False
 
-# --- NOVA FUNÇÃO LEVE: SÓ CHECA PAGAMENTO ---
 def verificar_apenas_pagamento(driver):
-    # Assume que já buscou o contrato e está na tela inicial dele
     try:
-        # 1. Clica direto na aba COTA
-        driver.find_element(By.LINK_TEXT, "Cota").click()
-        time.sleep(1)
-    except: 
-        try: driver.find_element(By.XPATH, "//a[contains(text(), 'Cota')]").click()
-        except: pass
-
-    # 2. Lê pagamento
-    try:
-        valor_pago = 0
-        try:
-            elem = driver.find_element(By.XPATH, "/html/body/table[8]/tbody/tr[25]/td[2]/span")
-            valor_pago = limpar_valor(elem.text)
-        except:
-            elem = driver.find_element(By.XPATH, "//td[contains(text(), 'Parcelas Pagas:')]/following-sibling::td")
-            valor_pago = limpar_valor(elem.text)
-        
+        elem = driver.find_element(By.XPATH, "//td[contains(text(), 'Parcelas Pagas:')]/following-sibling::td")
+        valor_pago = limpar_inteiro(elem.text)
         return (valor_pago > 0)
     except: 
         return False
@@ -218,30 +220,17 @@ def extrair_dados_completos(driver):
     except: pass
     
     try:
+        elem = driver.find_element(By.XPATH, "//td[contains(text(), 'Parcelas Pagas:')]/following-sibling::td")
+        valor_pago = limpar_inteiro(elem.text)
+        if valor_pago > 0: dados['pago'] = True
+    except: dados['pago'] = False
+
+    try:
         driver.find_element(By.XPATH, "//*[contains(text(), 'Telefones')]").click()
         time.sleep(1.5)
         xpath_celular = "//td[contains(text(), 'Celular')]/parent::tr/td[2]"
         dados['telefone'] = driver.find_element(By.XPATH, xpath_celular).text.strip()
     except: pass
-
-    try:
-        driver.find_element(By.LINK_TEXT, "Cota").click()
-        time.sleep(1)
-    except: 
-        try: driver.find_element(By.XPATH, "//a[contains(text(), 'Cota')]").click()
-        except: pass
-
-    try:
-        valor_pago = 0
-        try:
-            elem = driver.find_element(By.XPATH, "/html/body/table[8]/tbody/tr[25]/td[2]/span")
-            valor_pago = limpar_valor(elem.text)
-        except:
-            elem = driver.find_element(By.XPATH, "//td[contains(text(), 'Parcelas Pagas:')]/following-sibling::td")
-            valor_pago = limpar_valor(elem.text)
-        
-        if valor_pago > 0: dados['pago'] = True
-    except: dados['pago'] = False
 
     return dados
 
@@ -282,7 +271,7 @@ def loop_servico():
 
     while True:
         try:
-            # 1. PROCESSAMENTO DE NOVOS (COMPLETO)
+            # 1. PROCESSAMENTO DE NOVOS
             if os.path.exists(ARQUIVO_FILA):
                 try: shutil.move(ARQUIVO_FILA, ARQUIVO_EM_PROCESSAMENTO)
                 except: time.sleep(1); continue
@@ -312,7 +301,7 @@ def loop_servico():
                         continue
 
                     if buscar_contrato(driver, contrato):
-                        dados = extrair_dados_completos(driver) # Processo lento e completo
+                        dados = extrair_dados_completos(driver)
                         
                         status_final = atualizar_planilha(sheet, row, dados, contrato)
                         
@@ -329,7 +318,7 @@ def loop_servico():
 
                 if os.path.exists(ARQUIVO_EM_PROCESSAMENTO): os.remove(ARQUIVO_EM_PROCESSAMENTO)
 
-            # 2. REANÁLISE (RÁPIDA)
+            # 2. REANÁLISE RÁPIDA (COM BUSCA DE LINHA EXISTENTE)
             pendentes = carregar_pendentes()
             agora = time.time()
             mudou_pendentes = False
@@ -341,16 +330,24 @@ def loop_servico():
                     print(f"\n[REANÁLISE] Verificando {contrato} (Tentativa {info['tentativas']+1}/{MAX_TENTATIVAS})...")
                     
                     if buscar_contrato(driver, contrato):
-                        # AQUI ESTÁ A OTIMIZAÇÃO: Usa função rápida
                         pagou = verificar_apenas_pagamento(driver)
                         
                         if pagou:
-                            print("   [PAGAMENTO DETECTADO] Atualizando planilha...")
+                            print("   [PAGAMENTO DETECTADO] Procurando linha original na planilha...")
                             sheet = conectar_google_sheets(info['nome_planilha'])
                             if sheet:
-                                # Reconstrói o objeto 'dados' apenas com o necessário
-                                dados_fake = {'pago': True} 
-                                atualizar_planilha(sheet, info['dados_originais'], dados_fake, contrato)
+                                linha_existente = encontrar_linha_do_contrato(sheet, contrato)
+                                
+                                if linha_existente:
+                                    # Atualiza APENAS a Coluna B (Status Adimplência) da linha que já existe
+                                    sheet.update_cell(linha_existente, 2, "1º Parcela Paga")
+                                    print(f"   [SUCESSO] Status atualizado direto na linha {linha_existente}!")
+                                else:
+                                    # Fallback: Se alguém apagou a linha original sem querer, cria uma nova
+                                    print("   [AVISO] Linha original sumiu! Criando uma nova por segurança...")
+                                    dados_completos = extrair_dados_completos(driver)
+                                    atualizar_planilha(sheet, info['dados_originais'], dados_completos, contrato)
+
                                 salvar_historico_concluido(contrato, info['nome_planilha'], info['vendedor_nome'], info['vendedor_tel'], "1º Parcela Paga (Reanálise)")
                                 del pendentes[contrato]
                                 mudou_pendentes = True

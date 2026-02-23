@@ -10,13 +10,14 @@ const ARQUIVO_FILA = 'fila_vendas.csv';
 const ARQUIVO_HISTORICO_SUCESSO = 'historico_concluidos.csv'; 
 
 let mapaVendedores = {};
-let contratosAvisados = new Set(); // Apenas para feedback (msg de whats), não para lógica de bloqueio
+let contratosAvisados = new Set(); // VOLTOU A GUARDAR APENAS O NÚMERO DO CONTRATO
 let sistemaIniciado = false;
 
 const client = new Client({
     authStrategy: new LocalAuth(),
+    authTimeoutMs: 120000, 
     puppeteer: { 
-        headless: true,
+        headless: true, // Pode deixar true agora se quiser que rode escondido
         args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu']
     }
 });
@@ -55,12 +56,10 @@ function carregarVendedores() {
 }
 
 function contratoJaProcessado(contrato) {
-    // 1. Verifica se está na fila (Aguardando processamento)
     if (fs.existsSync(ARQUIVO_FILA)) {
         const fila = fs.readFileSync(ARQUIVO_FILA, 'utf-8');
         if (fila.includes(contrato)) return true;
     }
-    // 2. Verifica se está no histórico (Concluído) - LÊ O ARQUIVO AGORA (SEM MEMÓRIA CACHE)
     if (fs.existsSync(ARQUIVO_HISTORICO_SUCESSO)) {
         const historico = fs.readFileSync(ARQUIVO_HISTORICO_SUCESSO, 'utf-8');
         if (historico.includes(contrato)) return true;
@@ -85,11 +84,13 @@ function verificarConcluidosEConfirmar() {
     stream.on('data', async (row) => {
         const contrato = row.contrato;
         let telefoneRaw = row.vendedor_tel || row['número'] || row.numero; 
-        const status = row.status_pagamento || row['1º paga'];
+        const status = row.status_pagamento || row['1º paga'] || "Registrado";
 
+        // Verifica SÓ o número do contrato na memória
         if (contrato && !contratosAvisados.has(contrato)) {
             if (telefoneRaw) {
-                contratosAvisados.add(contrato); // Memória apenas para não spamar mensagem repetida
+                contratosAvisados.add(contrato); // Salva o contrato na memória para nunca mais avisar
+                
                 try {
                     let numeroLimpo = limparIdUsuario(telefoneRaw + "@c.us"); 
                     if (numeroLimpo.length >= 10 && numeroLimpo.length <= 11) numeroLimpo = '55' + numeroLimpo; 
@@ -98,9 +99,12 @@ function verificarConcluidosEConfirmar() {
                     
                     if (idValidado) {
                         const chatId = idValidado._serialized;
-                        let msg = `✅ *Cadastro Confirmado!*\n\n📄 Contrato: ${contrato}\n📊 Planilha: Atualizada\n💰 Status: ${status}`;
+                        
+                        // Mensagem focada no Registro (mas informando como ele entrou na planilha)
+                        let msg = `✅ *Contrato Registrado!*\n\n📄 Contrato: ${contrato}\n📊 Planilha: Atualizada\n📌 Status Inicial: ${status}`;
+                        
                         await client.sendMessage(chatId, msg);
-                        console.log(`[FEEDBACK] ✅ Mensagem enviada para ${numeroLimpo}`);
+                        console.log(`[FEEDBACK] ✅ Mensagem de registro enviada para ${numeroLimpo}`);
                     }
                 } catch (e) {
                     console.error(`[ERRO FEEDBACK] ${e.message}`);
@@ -149,16 +153,13 @@ async function processarMensagem(msg) {
                     dados.vendedor = nomeVendedor;
                     dados.telefone = idAutor; 
 
-                    // CORREÇÃO: Lê o arquivo AGORA para ver se existe
                     if (!contratoJaProcessado(dados.contrato)) {
                         console.log(`[NOVO] Vendedor: ${nomeVendedor} | Contrato: ${dados.contrato}`);
                         salvarNaFila(dados);
                     } else {
-                        // REQUISITO: Avisar duplicidade
                         console.log(`[DUPLICADO] Contrato ${dados.contrato} recusado (já processado).`);
                     }
                 } else {
-                    // REQUISITO: Avisar não autorizado
                     console.log(`[NEGADO] Mensagem válida, mas número ${idAutor} não está na lista de vendedores.`);
                 }
             }
@@ -186,9 +187,7 @@ async function recuperarMensagensAntigas() {
                 await processarMensagem(msg);
             }
             await atraso(500); 
-        } catch (erro) {
-            // Ignora chat inexistente
-        }
+        } catch (erro) {}
     }
     console.log('>>> RECUPERAÇÃO CONCLUÍDA. MODO TEMPO REAL ATIVO. <<<\n');
 }
@@ -200,15 +199,19 @@ client.on('qr', (qr) => qrcode.generate(qr, { small: true }));
 client.on('ready', async () => {
     if (sistemaIniciado) return;
     sistemaIniciado = true;
-    console.log('\n>>> MONITOR V7.5 (SEM MEMÓRIA CACHE + LOGS) INICIADO <<<');
+    console.log('\n>>> MONITOR V7.7 (AVISO APENAS NO REGISTRO) INICIADO <<<');
     
     await carregarVendedores();
 
-    // Sincroniza apenas para feedback (não repetir msg de sucesso), mas não bloqueia a lógica
     if (fs.existsSync(ARQUIVO_HISTORICO_SUCESSO)) {
          fs.createReadStream(ARQUIVO_HISTORICO_SUCESSO)
             .pipe(csv())
-            .on('data', (row) => { if(row.contrato) contratosAvisados.add(row.contrato); })
+            .on('data', (row) => { 
+                // Popula a memória SÓ com o contrato
+                if(row.contrato) {
+                    contratosAvisados.add(row.contrato);
+                }
+            })
             .on('end', async () => {
                 await recuperarMensagensAntigas();
                 setInterval(verificarConcluidosEConfirmar, 10000); 
