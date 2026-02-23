@@ -10,14 +10,14 @@ const ARQUIVO_FILA = 'fila_vendas.csv';
 const ARQUIVO_HISTORICO_SUCESSO = 'historico_concluidos.csv'; 
 
 let mapaVendedores = {};
-let contratosAvisados = new Set(); // VOLTOU A GUARDAR APENAS O NÚMERO DO CONTRATO
+let contratosAvisados = new Set(); // Guarda apenas o número do contrato (Avisa só no registro)
 let sistemaIniciado = false;
 
 const client = new Client({
     authStrategy: new LocalAuth(),
     authTimeoutMs: 120000, 
     puppeteer: { 
-        headless: true, // Pode deixar true agora se quiser que rode escondido
+        headless: true,
         args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu']
     }
 });
@@ -31,12 +31,15 @@ function limparIdUsuario(rawId) {
     return cleanNumber.replace(/\D/g, '');
 }
 
+// Configuração segura para ler CSV ignorando caracteres invisíveis (BOM) do Excel
+const csvConfig = { mapHeaders: ({ header }) => header.trim().replace(/^[\uFEFF\xEF\xBB\xBF]+/, '') };
+
 function carregarVendedores() {
     return new Promise((resolve, reject) => {
         mapaVendedores = {};
         if (fs.existsSync(ARQUIVO_VENDEDORES)) {
             fs.createReadStream(ARQUIVO_VENDEDORES)
-                .pipe(csv())
+                .pipe(csv(csvConfig))
                 .on('data', (row) => {
                     try {
                         const tel = (row.telefone || row.Telefone) ? (row.telefone || row.Telefone).replace(/\D/g, '') : null;
@@ -79,17 +82,17 @@ function salvarNaFila(dados) {
 function verificarConcluidosEConfirmar() {
     if (!fs.existsSync(ARQUIVO_HISTORICO_SUCESSO)) return;
 
-    const stream = fs.createReadStream(ARQUIVO_HISTORICO_SUCESSO).pipe(csv());
+    const stream = fs.createReadStream(ARQUIVO_HISTORICO_SUCESSO).pipe(csv(csvConfig));
     
     stream.on('data', async (row) => {
         const contrato = row.contrato;
-        let telefoneRaw = row.vendedor_tel || row['número'] || row.numero; 
+        let telefoneRaw = row.vendedor_tel || row['número'] || row.numero || row.telefone || row.vendedor; 
         const status = row.status_pagamento || row['1º paga'] || "Registrado";
 
         // Verifica SÓ o número do contrato na memória
         if (contrato && !contratosAvisados.has(contrato)) {
             if (telefoneRaw) {
-                contratosAvisados.add(contrato); // Salva o contrato na memória para nunca mais avisar
+                contratosAvisados.add(contrato); // Salva para nunca mais avisar
                 
                 try {
                     let numeroLimpo = limparIdUsuario(telefoneRaw + "@c.us"); 
@@ -100,16 +103,22 @@ function verificarConcluidosEConfirmar() {
                     if (idValidado) {
                         const chatId = idValidado._serialized;
                         
-                        // Mensagem focada no Registro (mas informando como ele entrou na planilha)
+                        // Mensagem focada apenas no Registro
                         let msg = `✅ *Contrato Registrado!*\n\n📄 Contrato: ${contrato}\n📊 Planilha: Atualizada\n📌 Status Inicial: ${status}`;
                         
                         await client.sendMessage(chatId, msg);
                         console.log(`[FEEDBACK] ✅ Mensagem de registro enviada para ${numeroLimpo}`);
+                    } else {
+                        console.log(`[ERRO FEEDBACK] WhatsApp rejeitou o número: ${numeroLimpo}`);
                     }
                 } catch (e) {
                     console.error(`[ERRO FEEDBACK] ${e.message}`);
                 }
-            } 
+            } else {
+                // LOG DELATOR: Se chegar aqui, o arquivo CSV está quebrado/antigo!
+                console.log(`[ALERTA] Vi o contrato ${contrato} concluído, mas a coluna de telefone sumiu! Apague o historico_concluidos.csv e deixe o Python recriar.`);
+                contratosAvisados.add(contrato); // Adiciona na memória pra não spammar o erro
+            }
         }
     });
 }
@@ -199,13 +208,13 @@ client.on('qr', (qr) => qrcode.generate(qr, { small: true }));
 client.on('ready', async () => {
     if (sistemaIniciado) return;
     sistemaIniciado = true;
-    console.log('\n>>> MONITOR V7.7 (AVISO APENAS NO REGISTRO) INICIADO <<<');
+    console.log('\n>>> MONITOR V8.0 (ANTI-FALHA SILENCIOSA) INICIADO <<<');
     
     await carregarVendedores();
 
     if (fs.existsSync(ARQUIVO_HISTORICO_SUCESSO)) {
          fs.createReadStream(ARQUIVO_HISTORICO_SUCESSO)
-            .pipe(csv())
+            .pipe(csv(csvConfig))
             .on('data', (row) => { 
                 // Popula a memória SÓ com o contrato
                 if(row.contrato) {
