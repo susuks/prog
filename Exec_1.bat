@@ -1,5 +1,5 @@
 0'@echo off
-cd /d "%~dp0"
+cd /d "%~dp0main prog"
 
 echo ==========================================
 echo   INICIANDO SISTEMA DE AUTOMACAO TOTAL
