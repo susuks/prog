@@ -20,7 +20,6 @@ historico_concluidos.csv
 back.rar
 pendentes_reanalise.json
 
-
 # Arquivos temporários e de log
 *.log
 temp_processando.csv
