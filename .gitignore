@@ -19,6 +19,8 @@ sticker_pronto.webp
 historico_concluidos.csv
 back.rar
 pendentes_reanalise.json
+vendedores.csv
+vendedores enc.csv
 
 # Arquivos temporários e de log
 *.log
