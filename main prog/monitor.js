@@ -9,8 +9,23 @@ const ARQUIVO_VENDEDORES = 'vendedores.csv';
 const ARQUIVO_FILA = 'fila_vendas.csv'; 
 const ARQUIVO_HISTORICO_SUCESSO = 'historico_concluidos.csv'; 
 
+// --- NOVO: DICIONÁRIO DE ORIGENS ---
+const MAPA_ORIGENS = {
+    "1": "DuoTalk",
+    "2": "Tráfego",
+    "3": "Remarketing",
+    "4": "Contato Lucas",
+    "5": "Outro",
+    "6": "Indicação",
+    "7": "RMKT + RMKT pessoal",
+    "8": "TRFG + RMKT pessoal",
+    "9": "DT + RMKT pessoal",
+    "10": "Ctt.L + RMKT pessoal",
+    "11": "Site"
+};
+
 let mapaVendedores = {};
-let contratosAvisados = new Set(); // Guarda apenas o número do contrato (Avisa só no registro)
+let contratosAvisados = new Set(); 
 let sistemaIniciado = false;
 
 const client = new Client({
@@ -31,7 +46,6 @@ function limparIdUsuario(rawId) {
     return cleanNumber.replace(/\D/g, '');
 }
 
-// Configuração segura para ler CSV ignorando caracteres invisíveis (BOM) do Excel
 const csvConfig = { mapHeaders: ({ header }) => header.trim().replace(/^[\uFEFF\xEF\xBB\xBF]+/, '') };
 
 function carregarVendedores() {
@@ -89,10 +103,9 @@ function verificarConcluidosEConfirmar() {
         let telefoneRaw = row.vendedor_tel || row['número'] || row.numero || row.telefone || row.vendedor; 
         const status = row.status_pagamento || row['1º paga'] || "Registrado";
 
-        // Verifica SÓ o número do contrato na memória
         if (contrato && !contratosAvisados.has(contrato)) {
             if (telefoneRaw) {
-                contratosAvisados.add(contrato); // Salva para nunca mais avisar
+                contratosAvisados.add(contrato); 
                 
                 try {
                     let numeroLimpo = limparIdUsuario(telefoneRaw + "@c.us"); 
@@ -102,10 +115,7 @@ function verificarConcluidosEConfirmar() {
                     
                     if (idValidado) {
                         const chatId = idValidado._serialized;
-                        
-                        // Mensagem focada apenas no Registro
                         let msg = `✅ *Contrato Registrado!*\n\n📄 Contrato: ${contrato}\n📊 Planilha: Atualizada\n📌 Status Inicial: ${status}`;
-                        
                         await client.sendMessage(chatId, msg);
                         console.log(`[FEEDBACK] ✅ Mensagem de registro enviada para ${numeroLimpo}`);
                     } else {
@@ -115,9 +125,8 @@ function verificarConcluidosEConfirmar() {
                     console.error(`[ERRO FEEDBACK] ${e.message}`);
                 }
             } else {
-                // LOG DELATOR: Se chegar aqui, o arquivo CSV está quebrado/antigo!
-                console.log(`[ALERTA] Vi o contrato ${contrato} concluído, mas a coluna de telefone sumiu! Apague o historico_concluidos.csv e deixe o Python recriar.`);
-                contratosAvisados.add(contrato); // Adiciona na memória pra não spammar o erro
+                console.log(`[ALERTA] Vi o contrato ${contrato} concluído, mas a coluna de telefone sumiu!`);
+                contratosAvisados.add(contrato); 
             }
         }
     });
@@ -126,7 +135,19 @@ function verificarConcluidosEConfirmar() {
 function extrairDados(texto) {
     const regex = /(\d{5,})\s*,\s*([^,]+)(?:\s*,\s*([\d\.]+))?/;
     const match = texto.match(regex);
-    if (match) return { contrato: match[1].trim(), origem: match[2].trim(), lance: match[3] ? match[3].trim() : "0" };
+    if (match) {
+        let origemExtraida = match[2].trim();
+        
+        // NOVO: Verifica se o valor extraído é um número mapeado no nosso dicionário
+        // Se for 2, vira "Tráfego". Se o vendedor escrever "Site" por extenso, mantém "Site" (fallback)
+        let origemFinal = MAPA_ORIGENS[origemExtraida] || origemExtraida;
+
+        return { 
+            contrato: match[1].trim(), 
+            origem: origemFinal, 
+            lance: match[3] ? match[3].trim() : "0" 
+        };
+    }
     return null;
 }
 
@@ -163,7 +184,7 @@ async function processarMensagem(msg) {
                     dados.telefone = idAutor; 
 
                     if (!contratoJaProcessado(dados.contrato)) {
-                        console.log(`[NOVO] Vendedor: ${nomeVendedor} | Contrato: ${dados.contrato}`);
+                        console.log(`[NOVO] Vendedor: ${nomeVendedor} | Contrato: ${dados.contrato} | Origem: ${dados.origem}`);
                         salvarNaFila(dados);
                     } else {
                         console.log(`[DUPLICADO] Contrato ${dados.contrato} recusado (já processado).`);
@@ -208,7 +229,7 @@ client.on('qr', (qr) => qrcode.generate(qr, { small: true }));
 client.on('ready', async () => {
     if (sistemaIniciado) return;
     sistemaIniciado = true;
-    console.log('\n>>> MONITOR V8.0 (ANTI-FALHA SILENCIOSA) INICIADO <<<');
+    console.log('\n>>> MONITOR V8.1 (MAPEAMENTO DE ORIGENS) INICIADO <<<');
     
     await carregarVendedores();
 
@@ -216,7 +237,6 @@ client.on('ready', async () => {
          fs.createReadStream(ARQUIVO_HISTORICO_SUCESSO)
             .pipe(csv(csvConfig))
             .on('data', (row) => { 
-                // Popula a memória SÓ com o contrato
                 if(row.contrato) {
                     contratosAvisados.add(row.contrato);
                 }

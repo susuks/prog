@@ -23,8 +23,8 @@ ARQUIVO_PENDENTES = 'pendentes_reanalise.json'
 ARQUIVO_CONFIG = 'config.txt'
 
 # --- CONFIGURAÇÕES ---
-INTERVALO_REANALISE_SEGUNDOS = 60 # 1 Minuto
-MAX_TENTATIVAS = 300
+# Limite gigantesco porque agora a checagem é contínua e super rápida
+MAX_TENTATIVAS = 10000 
 TEMPO_INATIVIDADE_MAXIMO = 300 # 5 Minutos
 
 def carregar_configuracoes():
@@ -69,11 +69,10 @@ def adicionar_para_reanalise(contrato, vendedor_nome, vendedor_tel, nome_planilh
         "nome_planilha": nome_planilha,
         "origem": origem,
         "dados_originais": dados_completos,
-        "tentativas": 0,
-        "proxima_verificacao": time.time() + INTERVALO_REANALISE_SEGUNDOS
+        "tentativas": 0
     }
     salvar_pendentes(pendentes)
-    print(f"   [AGENDADO] Contrato {contrato} agendado para reanálise em 1 minuto.")
+    print(f"   [AGENDADO] Contrato {contrato} adicionado ao loop contínuo de reanálise.")
 
 def salvar_historico_concluido(contrato, nome_planilha, vendedor_nome, vendedor_tel, status_pag):
     existe = os.path.exists(ARQUIVO_HISTORICO_SUCESSO)
@@ -110,15 +109,12 @@ def encontrar_proxima_linha_vazia(sheet):
         except: return i + 1
     return 12
 
-# NOVA FUNÇÃO: Procura a linha exata do contrato na planilha
 def encontrar_linha_do_contrato(sheet, contrato):
     try:
-        # A Coluna M é a 13ª coluna da planilha onde o contrato é salvo
         coluna_m = sheet.col_values(13)
-        # Varre a coluna procurando o número (enumerate começa no 1 para bater com a linha da planilha)
         for i, valor in enumerate(coluna_m, start=1):
             if str(contrato).strip() == str(valor).strip():
-                return i # Retorna o número da linha
+                return i 
     except Exception as e:
         print(f"   [ERRO BUSCA PLANILHA] {e}")
     return None
@@ -262,7 +258,7 @@ def manter_sessao_viva(driver):
     except: return False
 
 def loop_servico():
-    print(">>> SERVIÇO DE COLETA E REANÁLISE (MODO TURBO) <<<")
+    print(">>> SERVIÇO DE COLETA (MODO LOOP CONTÍNUO) <<<")
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
     if not fazer_login_automatico(driver): return
 
@@ -270,7 +266,7 @@ def loop_servico():
 
     while True:
         try:
-            # 1. PROCESSAMENTO DE NOVOS
+            # 1. PROCESSAMENTO DE NOVOS (PRIORIDADE MÁXIMA)
             if os.path.exists(ARQUIVO_FILA):
                 try: shutil.move(ARQUIVO_FILA, ARQUIVO_EM_PROCESSAMENTO)
                 except: time.sleep(1); continue
@@ -317,49 +313,53 @@ def loop_servico():
 
                 if os.path.exists(ARQUIVO_EM_PROCESSAMENTO): os.remove(ARQUIVO_EM_PROCESSAMENTO)
 
-            # 2. REANÁLISE RÁPIDA (COM BUSCA DE LINHA EXISTENTE)
+            # 2. REANÁLISE RÁPIDA (CONTÍNUA)
             pendentes = carregar_pendentes()
-            agora = time.time()
             mudou_pendentes = False
             lista_pendentes = list(pendentes.items()) 
 
+            # Processa todos os pendentes, um por um, mas com um "radar" ligado
             for contrato, info in lista_pendentes:
-                if agora >= info['proxima_verificacao']:
-                    ultimo_keep_alive = time.time()
-                    print(f"\n[REANÁLISE] Verificando {contrato} (Tentativa {info['tentativas']+1}/{MAX_TENTATIVAS})...")
-                    
-                    if buscar_contrato(driver, contrato):
-                        pagou = verificar_apenas_pagamento(driver)
-                        
-                        if pagou:
-                            print("   [PAGAMENTO DETECTADO] Procurando linha original na planilha...")
-                            sheet = conectar_google_sheets(info['nome_planilha'])
-                            if sheet:
-                                linha_existente = encontrar_linha_do_contrato(sheet, contrato)
-                                
-                                if linha_existente:
-                                    # Atualiza APENAS a Coluna B (Status Adimplência) da linha que já existe
-                                    sheet.update_cell(linha_existente, 2, "1º Parcela Paga")
-                                    print(f"   [SUCESSO] Status atualizado direto na linha {linha_existente}!")
-                                else:
-                                    # Fallback: Se alguém apagou a linha original sem querer, cria uma nova
-                                    print("   [AVISO] Linha original sumiu! Criando uma nova por segurança...")
-                                    dados_completos = extrair_dados_completos(driver)
-                                    atualizar_planilha(sheet, info['dados_originais'], dados_completos, contrato)
+                
+                # --- O RADAR DE INTERRUPÇÃO ---
+                # Se durante a checagem cair um contrato novo no WhatsApp, ele quebra o loop
+                # de pendentes na hora e volta pro começo (passo 1) para priorizar o novato!
+                if os.path.exists(ARQUIVO_FILA):
+                    print(f"\n[INTERRUPÇÃO] Novo contrato detectado na fila! Pausando reanálises...")
+                    break 
 
-                                salvar_historico_concluido(contrato, info['nome_planilha'], info['vendedor_nome'], info['vendedor_tel'], "1º Parcela Paga (Reanálise)")
-                                del pendentes[contrato]
-                                mudou_pendentes = True
-                        else:
-                            print("   [AINDA NÃO PAGO] Reagendando...")
-                            info['tentativas'] += 1
-                            if info['tentativas'] >= MAX_TENTATIVAS:
-                                print("   [EXPIROU] Desistindo.")
-                                del pendentes[contrato]
+                ultimo_keep_alive = time.time()
+                info['tentativas'] = info.get('tentativas', 0) + 1
+                
+                print(f"\n[REANÁLISE CONTÍNUA] Verificando {contrato} (Tentativa {info['tentativas']}/{MAX_TENTATIVAS})...")
+                
+                if buscar_contrato(driver, contrato):
+                    pagou = verificar_apenas_pagamento(driver)
+                    
+                    if pagou:
+                        print("   [PAGAMENTO DETECTADO] Procurando linha original na planilha...")
+                        sheet = conectar_google_sheets(info['nome_planilha'])
+                        if sheet:
+                            linha_existente = encontrar_linha_do_contrato(sheet, contrato)
+                            
+                            if linha_existente:
+                                sheet.update_cell(linha_existente, 2, "1º Parcela Paga")
+                                print(f"   [SUCESSO] Status atualizado direto na linha {linha_existente}!")
                             else:
-                                info['proxima_verificacao'] = agora + INTERVALO_REANALISE_SEGUNDOS
+                                print("   [AVISO] Linha original sumiu! Criando uma nova por segurança...")
+                                dados_completos = extrair_dados_completos(driver)
+                                atualizar_planilha(sheet, info['dados_originais'], dados_completos, contrato)
+
+                            salvar_historico_concluido(contrato, info['nome_planilha'], info['vendedor_nome'], info['vendedor_tel'], "1º Parcela Paga (Reanálise)")
+                            del pendentes[contrato]
                             mudou_pendentes = True
-            
+                    else:
+                        print("   [AINDA NÃO PAGO] Indo para o próximo da fila...")
+                        if info['tentativas'] >= MAX_TENTATIVAS:
+                            print("   [EXPIROU] Desistindo após limite máximo de tentativas alcançado.")
+                            del pendentes[contrato]
+                        mudou_pendentes = True
+                
             if mudou_pendentes:
                 salvar_pendentes(pendentes)
 
@@ -370,7 +370,7 @@ def loop_servico():
                     fazer_login_automatico(driver)
                 ultimo_keep_alive = time.time()
 
-            time.sleep(5) 
+            time.sleep(3) # Pausa pequena no final do loop principal
 
         except Exception as e:
             print(f"Erro Loop Geral: {e}")
