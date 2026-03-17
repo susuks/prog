@@ -21,6 +21,8 @@ back.rar
 pendentes_reanalise.json
 vendedores.csv
 vendedores enc.csv
+codigos.txt
+fila_vendas.csv
 
 # Arquivos temporários e de log
 *.log

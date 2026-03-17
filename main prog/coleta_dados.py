@@ -24,7 +24,10 @@ ARQUIVO_CONFIG = 'config.txt'
 
 # --- CONFIGURAÇÕES ---
 MAX_TENTATIVAS = 10000 
-TEMPO_INATIVIDADE_MAXIMO = 300
+TEMPO_INATIVIDADE_MAXIMO = 300 # 5 Minutos
+
+# --- NOVA TRAVA ANTI-BANIMENTO ---
+PAUSA_HUMANA = 0.4 # Segundos de espera após cada clique para não derrubar o servidor
 
 def carregar_configuracoes():
     config = {
@@ -164,6 +167,7 @@ def buscar_contrato(driver, contrato):
         WebDriverWait(driver, 5).until(EC.frame_to_be_available_and_switch_to_it((By.NAME, "mainFrame")))
         WebDriverWait(driver, 5).until(EC.frame_to_be_available_and_switch_to_it((By.NAME, "LeftFrame")))
         driver.find_element(By.LINK_TEXT, "Consorciado").click()
+        time.sleep(PAUSA_HUMANA) # Pausa após clique no menu
     except: pass
     
     driver.switch_to.default_content()
@@ -175,13 +179,13 @@ def buscar_contrato(driver, contrato):
         campo.clear()
         campo.send_keys(contrato)
         driver.find_element(By.XPATH, "//input[contains(@value, 'Localizar')]").click()
+        time.sleep(PAUSA_HUMANA) # Pausa após pedir para localizar
         
-        # OTIMIZAÇÃO 1: Em vez de dormir, espera a grelha de resultados aparecer e ficar clicável
         xpath_resultado = f"//td/div[contains(text(), '{contrato}')] | //td[contains(@class, 'hand')]/div"
         resultado = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.XPATH, xpath_resultado)))
         resultado.click()
+        time.sleep(PAUSA_HUMANA) # Pausa após abrir o contrato
         
-        # OTIMIZAÇÃO 2: Em vez de dormir, espera a página de detalhes carregar o título 'Consorciado:'
         driver.switch_to.default_content()
         WebDriverWait(driver, 5).until(EC.frame_to_be_available_and_switch_to_it((By.NAME, "mainFrame")))
         WebDriverWait(driver, 5).until(EC.frame_to_be_available_and_switch_to_it((By.NAME, "MainFrame")))
@@ -221,7 +225,8 @@ def extrair_dados_completos(driver):
 
     try:
         driver.find_element(By.XPATH, "//*[contains(text(), 'Telefones')]").click()
-        # OTIMIZAÇÃO 3: Em vez de dormir, espera dinamicamente a célula de celular surgir no ecrã
+        time.sleep(PAUSA_HUMANA) # Pausa após abrir telefones
+        
         xpath_celular = "//td[contains(text(), 'Celular')]/parent::tr/td[2]"
         elem_celular = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.XPATH, xpath_celular)))
         dados['telefone'] = elem_celular.text.strip()
@@ -253,12 +258,13 @@ def manter_sessao_viva(driver):
         WebDriverWait(driver, 5).until(EC.frame_to_be_available_and_switch_to_it((By.NAME, "mainFrame")))
         WebDriverWait(driver, 5).until(EC.frame_to_be_available_and_switch_to_it((By.NAME, "LeftFrame")))
         driver.find_element(By.LINK_TEXT, "Consorciado").click()
+        time.sleep(PAUSA_HUMANA) # Pausa no keep alive
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Keep-Alive: Sessão renovada.")
         return True
     except: return False
 
 def loop_servico():
-    print(">>> SERVIÇO DE COLETA (MODO ULTRASSÓNICO) <<<")
+    print(">>> SERVIÇO DE COLETA (MODO HUMANO RÁPIDO) <<<")
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
     if not fazer_login_automatico(driver): return
 
@@ -266,10 +272,11 @@ def loop_servico():
 
     while True:
         try:
+            # 1. PROCESSAMENTO DE NOVOS
             if os.path.exists(ARQUIVO_FILA):
                 try: shutil.move(ARQUIVO_FILA, ARQUIVO_EM_PROCESSAMENTO)
                 except: 
-                    time.sleep(1) # Espera sistema de ficheiros soltar o ficheiro
+                    time.sleep(1) 
                     continue
 
                 ultimo_keep_alive = time.time()
@@ -314,6 +321,7 @@ def loop_servico():
 
                 if os.path.exists(ARQUIVO_EM_PROCESSAMENTO): os.remove(ARQUIVO_EM_PROCESSAMENTO)
 
+            # 2. REANÁLISE RÁPIDA (CONTÍNUA)
             pendentes = carregar_pendentes()
             mudou_pendentes = False
             lista_pendentes = list(pendentes.items()) 
@@ -364,7 +372,7 @@ def loop_servico():
                     fazer_login_automatico(driver)
                 ultimo_keep_alive = time.time()
 
-            time.sleep(1.5) 
+            time.sleep(1) 
 
         except Exception as e:
             print(f"Erro Loop Geral: {e}")
