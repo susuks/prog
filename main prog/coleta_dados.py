@@ -23,9 +23,8 @@ ARQUIVO_PENDENTES = 'pendentes_reanalise.json'
 ARQUIVO_CONFIG = 'config.txt'
 
 # --- CONFIGURAÇÕES ---
-# Limite gigantesco porque agora a checagem é contínua e super rápida
 MAX_TENTATIVAS = 10000 
-TEMPO_INATIVIDADE_MAXIMO = 300 # 5 Minutos
+TEMPO_INATIVIDADE_MAXIMO = 300
 
 def carregar_configuracoes():
     config = {
@@ -167,7 +166,6 @@ def buscar_contrato(driver, contrato):
         driver.find_element(By.LINK_TEXT, "Consorciado").click()
     except: pass
     
-    time.sleep(1)
     driver.switch_to.default_content()
     try:
         WebDriverWait(driver, 5).until(EC.frame_to_be_available_and_switch_to_it((By.NAME, "mainFrame")))
@@ -177,17 +175,18 @@ def buscar_contrato(driver, contrato):
         campo.clear()
         campo.send_keys(contrato)
         driver.find_element(By.XPATH, "//input[contains(@value, 'Localizar')]").click()
-        time.sleep(1.5)
         
-        try: driver.find_element(By.XPATH, f"//td/div[contains(text(), '{contrato}')] | //td[contains(@class, 'hand')]/div").click()
-        except: pass
-        time.sleep(1)
+        # OTIMIZAÇÃO 1: Em vez de dormir, espera a grelha de resultados aparecer e ficar clicável
+        xpath_resultado = f"//td/div[contains(text(), '{contrato}')] | //td[contains(@class, 'hand')]/div"
+        resultado = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.XPATH, xpath_resultado)))
+        resultado.click()
         
+        # OTIMIZAÇÃO 2: Em vez de dormir, espera a página de detalhes carregar o título 'Consorciado:'
         driver.switch_to.default_content()
         WebDriverWait(driver, 5).until(EC.frame_to_be_available_and_switch_to_it((By.NAME, "mainFrame")))
         WebDriverWait(driver, 5).until(EC.frame_to_be_available_and_switch_to_it((By.NAME, "MainFrame")))
         
-        driver.find_element(By.XPATH, "//td[contains(text(), 'Consorciado:')]")
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.XPATH, "//td[contains(text(), 'Consorciado:')]")))
         return True
     except:
         return False
@@ -222,9 +221,10 @@ def extrair_dados_completos(driver):
 
     try:
         driver.find_element(By.XPATH, "//*[contains(text(), 'Telefones')]").click()
-        time.sleep(1.5)
+        # OTIMIZAÇÃO 3: Em vez de dormir, espera dinamicamente a célula de celular surgir no ecrã
         xpath_celular = "//td[contains(text(), 'Celular')]/parent::tr/td[2]"
-        dados['telefone'] = driver.find_element(By.XPATH, xpath_celular).text.strip()
+        elem_celular = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.XPATH, xpath_celular)))
+        dados['telefone'] = elem_celular.text.strip()
     except: pass
 
     return dados
@@ -258,7 +258,7 @@ def manter_sessao_viva(driver):
     except: return False
 
 def loop_servico():
-    print(">>> SERVIÇO DE COLETA (MODO LOOP CONTÍNUO) <<<")
+    print(">>> SERVIÇO DE COLETA (MODO ULTRASSÓNICO) <<<")
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
     if not fazer_login_automatico(driver): return
 
@@ -266,10 +266,11 @@ def loop_servico():
 
     while True:
         try:
-            # 1. PROCESSAMENTO DE NOVOS (PRIORIDADE MÁXIMA)
             if os.path.exists(ARQUIVO_FILA):
                 try: shutil.move(ARQUIVO_FILA, ARQUIVO_EM_PROCESSAMENTO)
-                except: time.sleep(1); continue
+                except: 
+                    time.sleep(1) # Espera sistema de ficheiros soltar o ficheiro
+                    continue
 
                 ultimo_keep_alive = time.time()
 
@@ -313,19 +314,13 @@ def loop_servico():
 
                 if os.path.exists(ARQUIVO_EM_PROCESSAMENTO): os.remove(ARQUIVO_EM_PROCESSAMENTO)
 
-            # 2. REANÁLISE RÁPIDA (CONTÍNUA)
             pendentes = carregar_pendentes()
             mudou_pendentes = False
             lista_pendentes = list(pendentes.items()) 
 
-            # Processa todos os pendentes, um por um, mas com um "radar" ligado
             for contrato, info in lista_pendentes:
-                
-                # --- O RADAR DE INTERRUPÇÃO ---
-                # Se durante a checagem cair um contrato novo no WhatsApp, ele quebra o loop
-                # de pendentes na hora e volta pro começo (passo 1) para priorizar o novato!
                 if os.path.exists(ARQUIVO_FILA):
-                    print(f"\n[INTERRUPÇÃO] Novo contrato detectado na fila! Pausando reanálises...")
+                    print(f"\n[INTERRUPÇÃO] Novo contrato detetado na fila! Pausando reanálises...")
                     break 
 
                 ultimo_keep_alive = time.time()
@@ -337,7 +332,7 @@ def loop_servico():
                     pagou = verificar_apenas_pagamento(driver)
                     
                     if pagou:
-                        print("   [PAGAMENTO DETECTADO] Procurando linha original na planilha...")
+                        print("   [PAGAMENTO DETETADO] Procurando linha original na planilha...")
                         sheet = conectar_google_sheets(info['nome_planilha'])
                         if sheet:
                             linha_existente = encontrar_linha_do_contrato(sheet, contrato)
@@ -363,14 +358,13 @@ def loop_servico():
             if mudou_pendentes:
                 salvar_pendentes(pendentes)
 
-            # 3. KEEP ALIVE
             if (time.time() - ultimo_keep_alive) > TEMPO_INATIVIDADE_MAXIMO:
                 if not manter_sessao_viva(driver):
                     print("[ERRO] Sessão perdida.") 
                     fazer_login_automatico(driver)
                 ultimo_keep_alive = time.time()
 
-            time.sleep(3) # Pausa pequena no final do loop principal
+            time.sleep(1.5) 
 
         except Exception as e:
             print(f"Erro Loop Geral: {e}")
