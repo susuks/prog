@@ -376,7 +376,7 @@ def loop_servico():
 
         except Exception as e:
             print(f"Erro Loop Geral: {e}")
-            time.sleep(5)
+            time.sleep(1)
 
 if __name__ == "__main__":
     loop_servico()
