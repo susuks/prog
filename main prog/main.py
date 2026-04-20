@@ -61,7 +61,6 @@ def loop_servico():
                         os.remove(ARQUIVO_EM_PROCESSAMENTO)
                     continue
 
-                # CORREÇÃO PYLINT: Usando '_' para variável não utilizada
                 for _, row in df.iterrows():
                     contrato = row.get('contrato')
                     vendedor = row.get('vendedor')
@@ -114,8 +113,11 @@ def loop_servico():
                     break
 
                 ultimo_keep_alive = time.time()
+
+                # CORREÇÃO 1: Garante que a tentativa seja computada e salva de imediato
                 info['tentativas'] = info.get('tentativas', 0) + 1
                 tentativa_atual = info['tentativas']
+                mudou_pendentes = True
 
                 msg_tentativa = f"\n[REANÁLISE] Verificando {contrato} " \
                                 f"(Tentativa {tentativa_atual}/{MAX_TENTATIVAS})..."
@@ -152,13 +154,15 @@ def loop_servico():
                                 "1º Parcela Paga (Reanálise)"
                             )
                             del pendentes[contrato]
-                            mudou_pendentes = True
                     else:
                         print("   [AINDA NÃO PAGO] Próximo...")
                         if tentativa_atual >= MAX_TENTATIVAS:
                             print("   [EXPIROU] Desistindo (limite atingido).")
                             del pendentes[contrato]
-                        mudou_pendentes = True
+                else:
+                    # CORREÇÃO 2: A Cota sumiu do sistema
+                    print("   [NÃO ENCONTRADO] Cota excluída ou indisponível. Removendo da fila.")
+                    del pendentes[contrato]
 
             if mudou_pendentes:
                 salvar_pendentes(pendentes)
@@ -174,7 +178,6 @@ def loop_servico():
 
             time.sleep(1)
 
-        # CORREÇÃO PYLINT: Informando que esta exceção ampla é intencional
         except Exception as e:  # pylint: disable=broad-exception-caught
             print(f"Erro Loop Geral: {e}")
             time.sleep(1)
