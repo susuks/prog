@@ -1,40 +1,49 @@
 """
-Módulo principal do sistema de coleta e reanálise de contratos.
-Gerencia o loop infinito e a integração entre o Google Sheets e o portal.
+Motor Principal de Automação de Coleta e Reanálise de Consórcio.
+
+Este script gerencia o ciclo de vida dos contratos: desde a captura inicial
+no WhatsApp (via arquivo de fila) até o monitoramento contínuo de pagamentos.
+Ele orquestra a navegação no portal da Tradição e o registro sincronizado
+em múltiplas planilhas do Google Sheets (Individual do Vendedor e Geral).
 """
 
 import os
 import time
 import shutil
 import pandas as pd
-
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 
-# Importação explícita de todas as ferramentas do seu módulo
+# Importação explícita do módulo de utilitários local
 from coletor_utils import (
-    ARQUIVO_FILA, ARQUIVO_EM_PROCESSAMENTO, PREFIXO_PLANILHA,
-    MAX_TENTATIVAS, TEMPO_INATIVIDADE_MAXIMO,
+    ARQUIVO_FILA, ARQUIVO_EM_PROCESSAMENTO, PREFIXO_PLANILHA, NOME_ABA,
+    NOME_ABA_GERAL, MAX_TENTATIVAS, TEMPO_INATIVIDADE_MAXIMO,
     fazer_login_automatico, conectar_google_sheets, buscar_contrato,
-    extrair_dados_completos, atualizar_planilha, salvar_historico_concluido,
-    adicionar_para_reanalise, carregar_pendentes, verificar_apenas_pagamento,
-    encontrar_linha_do_contrato, salvar_pendentes, manter_sessao_viva
+    extrair_dados_completos, atualizar_planilha_vendedor,
+    atualizar_planilha_geral, adicionar_para_reanalise, carregar_pendentes,
+    verificar_apenas_pagamento, encontrar_linha_do_contrato,
+    salvar_pendentes, manter_sessao_viva, salvar_historico_concluido
 )
-
 
 def loop_servico():
     """
-    Loop principal de processamento. Controla novos contratos, 
-    revisões na fila contínua e a vitalidade da sessão do navegador.
+    Loop de execução infinita para processamento de filas e reanálise.
+    
+    O loop é dividido em três fases principais:
+    1. Processamento de Novos Contratos: Prioridade máxima. Lê a fila,
+       extrai dados e registra nas planilhas do Vendedor e Geral.
+    2. Reanálise Contínua: Varre o cache de contratos pendentes em
+       busca de confirmação de pagamento.
+    3. Manutenção: Evita a queda da sessão por inatividade (Keep-Alive).
     """
-    print(">>> SERVIÇO DE COLETA (MODO MODULARIZADO) <<<")
+    print("\n>>> INICIANDO SISTEMA CENTRALIZADO (Vendedor + Geral) <<<")
 
-    # Inicializa o ChromeDriver
+    # Inicializa o ChromeDriver de forma silenciosa e automática
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
 
     if not fazer_login_automatico(driver):
-        print("[CRÍTICO] Falha na autenticação inicial.")
+        print("[ERRO CRÍTICO] Falha na autenticação inicial. Verifique as credenciais.")
         return
 
     ultimo_keep_alive = time.time()
@@ -42,145 +51,154 @@ def loop_servico():
     while True:
         try:
             # -------------------------------------------------------------
-            # FASE 1: PROCESSAMENTO DE NOVOS CONTRATOS (PRIORIDADE)
+            # FASE 1: REGISTRO DE NOVOS CONTRATOS (PRIORIDADE)
             # -------------------------------------------------------------
             if os.path.exists(ARQUIVO_FILA):
                 try:
                     shutil.move(ARQUIVO_FILA, ARQUIVO_EM_PROCESSAMENTO)
                 except OSError:
+                    # Aguarda caso o arquivo esteja travado pelo Node.js
                     time.sleep(1)
                     continue
 
                 ultimo_keep_alive = time.time()
-
                 try:
                     df = pd.read_csv(ARQUIVO_EM_PROCESSAMENTO, sep=',', dtype=str)
                     df.columns = [c.strip() for c in df.columns]
-                except (OSError, pd.errors.EmptyDataError):
+                except Exception:  # pylint: disable=broad-exception-caught
+                    # Se o CSV estiver vazio ou corrompido, limpa o arquivo temporário
                     if os.path.exists(ARQUIVO_EM_PROCESSAMENTO):
                         os.remove(ARQUIVO_EM_PROCESSAMENTO)
                     continue
 
                 for _, row in df.iterrows():
-                    contrato = row.get('contrato')
-                    vendedor = row.get('vendedor')
-                    vendedor_tel = row.get('telefone')
+                    contrato = str(row.get('contrato')).strip()
+                    vendedor = str(row.get('vendedor')).strip()
+                    telefone_vendedor = str(row.get('telefone')).strip()
+                    origem = str(row.get('origem', '')).strip()
 
-                    if pd.isna(contrato):
+                    if pd.isna(contrato) or not contrato or contrato == 'nan':
                         continue
 
-                    print(f"\nProcessando Novo: {contrato} ({vendedor})...")
-                    nome_planilha = f"{PREFIXO_PLANILHA}{str(vendedor).strip()}"
-                    sheet = conectar_google_sheets(nome_planilha)
+                    print(f"\n[NOVO] Processando Contrato: {contrato} (Vendedor: {vendedor})...")
 
-                    if not sheet:
-                        print(f"   [ERRO] Planilha {nome_planilha} indisponível.")
-                        continue
+                    # Conexão independente com as duas planilhas alvo
+                    nome_planilha_vendedor = f"{PREFIXO_PLANILHA}{vendedor}"
+                    nome_planilha_geral = f"{PREFIXO_PLANILHA}GERAL"
+
+                    sheet_vend = conectar_google_sheets(nome_planilha_vendedor, NOME_ABA)
+                    sheet_geral = conectar_google_sheets(nome_planilha_geral, NOME_ABA_GERAL)
 
                     if buscar_contrato(driver, contrato):
                         dados = extrair_dados_completos(driver)
-                        atualizar_planilha(sheet, row, dados, contrato)
+
+                        # Escrita paralela nas planilhas de destino
+                        if sheet_vend:
+                            atualizar_planilha_vendedor(sheet_vend, row.to_dict(), dados, contrato)
+                        else:
+                            print(f"   [AVISO] Não foi possível acessar a planilha '{nome_planilha_vendedor}'.")#pylint: disable=line-too-long
+
+                        if sheet_geral:
+                            atualizar_planilha_geral(sheet_geral, row.to_dict(), dados, contrato)
+                        else:
+                            print(f"   [AVISO] Não foi possível acessar a planilha '{nome_planilha_geral}'.")#pylint: disable=line-too-long
+
+                        print("   [OK] Registrado com sucesso.")
 
                         texto_status = "1º Parcela Paga" if dados['pago'] else "1º Parcela Não Paga"
                         salvar_historico_concluido(
-                            contrato, nome_planilha, vendedor,
-                            vendedor_tel, texto_status
+                            contrato, f"{nome_planilha_vendedor} + GERAL",
+                            vendedor, telefone_vendedor, texto_status
                         )
 
+                        # Se não pagou, entra na fila do motor de reanálise
                         if not dados['pago']:
                             adicionar_para_reanalise(
-                                contrato, vendedor, vendedor_tel,
-                                nome_planilha, row.get('origem'), row.to_dict()
+                                contrato, vendedor, telefone_vendedor,
+                                nome_planilha_vendedor, origem, row.to_dict()
                             )
-
-                        print("   [SUCESSO] Processado.")
                     else:
-                        print("   [ERRO] Contrato não achado no site.")
+                        print(f"   [ERRO] Contrato {contrato} não localizado no portal.")
 
+                # Limpeza do lote processado
                 if os.path.exists(ARQUIVO_EM_PROCESSAMENTO):
                     os.remove(ARQUIVO_EM_PROCESSAMENTO)
 
             # -------------------------------------------------------------
-            # FASE 2: REANÁLISE RÁPIDA CONTÍNUA
+            # FASE 2: REANÁLISE DE PAGAMENTOS (LOOP CONTÍNUO)
             # -------------------------------------------------------------
             pendentes = carregar_pendentes()
             mudou_pendentes = False
-            lista_pendentes = list(pendentes.items())
 
-            for contrato, info in lista_pendentes:
+            # Converte para lista de tuplas para evitar erro de alteração de dicionário durante iteração #pylint: disable=line-too-long
+
+            for contrato, info in list(pendentes.items()):
+                # Interrupção imediata se chegar lote novo
                 if os.path.exists(ARQUIVO_FILA):
-                    print("\n[INTERRUPÇÃO] Novo contrato na fila! Pausando...")
                     break
 
                 ultimo_keep_alive = time.time()
-
-                # CORREÇÃO 1: Garante que a tentativa seja computada e salva de imediato
                 info['tentativas'] = info.get('tentativas', 0) + 1
-                tentativa_atual = info['tentativas']
                 mudou_pendentes = True
 
-                msg_tentativa = f"\n[REANÁLISE] Verificando {contrato} " \
-                                f"(Tentativa {tentativa_atual}/{MAX_TENTATIVAS})..."
-                print(msg_tentativa)
+                print(f"[REANÁLISE] Verificando {contrato} (Tentativa {info['tentativas']}/{MAX_TENTATIVAS})...")#pylint: disable=line-too-long
+
 
                 if buscar_contrato(driver, contrato):
-                    pagou = verificar_apenas_pagamento(driver)
+                    if verificar_apenas_pagamento(driver):
+                        print("   [PAGAMENTO DETECTADO] Atualizando status nas planilhas...")
 
-                    if pagou:
-                        print("   [PAGAMENTO] Buscando linha original...")
-                        sheet = conectar_google_sheets(info['nome_planilha'])
-
-                        if sheet:
-                            linha_existente = encontrar_linha_do_contrato(
-                                sheet, contrato
-                            )
-
-                            if linha_existente:
-                                sheet.update_cell(
-                                    linha_existente, 2, "1º Parcela Paga"
-                                )
-                                print(f"   [SUCESSO] Linha {linha_existente} atualizada.")
+                        # Atualiza Planilha Vendedor (Coluna M / 13)
+                        sheet_v = conectar_google_sheets(info['nome_planilha'], NOME_ABA)
+                        if sheet_v:
+                            linha_v = encontrar_linha_do_contrato(sheet_v, contrato, col_idx=13)
+                            if linha_v:
+                                sheet_v.update_cell(linha_v, 2, "1º Parcela Paga")
                             else:
-                                print("   [AVISO] Nova linha de segurança gerada.")
-                                dados_completos = extrair_dados_completos(driver)
-                                atualizar_planilha(
-                                    sheet, info['dados_originais'],
-                                    dados_completos, contrato
-                                )
+                                print("   [AVISO] Linha não encontrada na planilha do vendedor.")
 
-                            salvar_historico_concluido(
-                                contrato, info['nome_planilha'],
-                                info['vendedor_nome'], info['vendedor_tel'],
-                                "1º Parcela Paga (Reanálise)"
-                            )
-                            del pendentes[contrato]
+                        # Atualiza Planilha Geral (Coluna L / 12)
+                        sheet_g = conectar_google_sheets(f"{PREFIXO_PLANILHA}GERAL", NOME_ABA_GERAL)
+                        if sheet_g:
+                            linha_g = encontrar_linha_do_contrato(sheet_g, contrato, col_idx=12)
+                            if linha_g:
+                                sheet_g.update_cell(linha_g, 1, "1º Parcela Paga")
+                            else:
+                                print("   [AVISO] Linha não encontrada na planilha GERAL.")
+
+                        salvar_historico_concluido(
+                            contrato, f"{info['nome_planilha']} + GERAL",
+                            info['vendedor_nome'], info['vendedor_tel'], "1º Parcela Paga (Reanálise)" #pylint: disable=line-too-long
+                        )
+                        # Remove da fila de pendentes após sucesso
+                        del pendentes[contrato]
                     else:
-                        print("   [AINDA NÃO PAGO] Próximo...")
-                        if tentativa_atual >= MAX_TENTATIVAS:
-                            print("   [EXPIROU] Desistindo (limite atingido).")
+                        # Se não pagou, verifica se excedeu o limite de tentativas
+                        if info['tentativas'] >= MAX_TENTATIVAS:
+                            print(f"[EXPIROU] Contrato {contrato} atingiu o limite de tentativas.")
                             del pendentes[contrato]
                 else:
-                    # CORREÇÃO 2: A Cota sumiu do sistema
-                    print("   [NÃO ENCONTRADO] Cota excluída ou indisponível. Removendo da fila.")
+                    # Se não achou o contrato (cota excluída/cancelada), limpa da fila
+                    print("   [NÃO ENCONTRADO] Cota indisponível no portal. Removendo da fila.")
                     del pendentes[contrato]
 
             if mudou_pendentes:
                 salvar_pendentes(pendentes)
 
             # -------------------------------------------------------------
-            # FASE 3: MANUTENÇÃO DE SESSÃO
+            # FASE 3: MANUTENÇÃO DE SESSÃO (KEEP-ALIVE)
             # -------------------------------------------------------------
             if (time.time() - ultimo_keep_alive) > TEMPO_INATIVIDADE_MAXIMO:
                 if not manter_sessao_viva(driver):
-                    print("[ERRO] Sessão perdida. Forçando Relogin.")
+                    print("[AVISO] Sessão expirada ou perdida. Forçando Relogin...")
                     fazer_login_automatico(driver)
                 ultimo_keep_alive = time.time()
 
             time.sleep(1)
 
         except Exception as e:  # pylint: disable=broad-exception-caught
-            print(f"Erro Loop Geral: {e}")
-            time.sleep(1)
+            print(f"[ERRO GERAL NO LOOP] A execução foi protegida. Detalhe: {e}")
+            time.sleep(2)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,12 @@
 """
-Módulo de utilitários para a automação de coleta de dados.
-Contém configurações, acesso ao Google Sheets e raspagem com Selenium.
+Módulo de Utilitários e Serviços para Automação de Consórcio.
+
+Este módulo centraliza todas as interações de baixo nível com a API do 
+Google Sheets e o driver do Selenium, permitindo que a lógica de negócio
+seja mantida de forma limpa no arquivo principal.
+
+As funções seguem o padrão de documentação do Google e respeitam as
+normas de estilo PEP 8, isolando exceções e garantindo a continuidade do robô.
 """
 
 import os
@@ -16,7 +22,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
-# --- CONSTANTES GERAIS ---
+# --- CONFIGURAÇÕES E CONSTANTES GLOBAIS ---
 ARQUIVO_FILA = 'fila_vendas.csv'
 ARQUIVO_EM_PROCESSAMENTO = 'temp_processando.csv'
 ARQUIVO_HISTORICO_SUCESSO = 'historico_concluidos.csv'
@@ -30,48 +36,53 @@ PAUSA_HUMANA = 0.4  # Segundos de espera após cada clique
 
 def carregar_configuracoes() -> dict:
     """
-    Lê o arquivo de configuração e retorna um dicionário com os valores.
-    Caso o arquivo não exista ou ocorra um erro, retorna dados padrão ou None.
-    
+    Lê o arquivo de configuração local e extrai credenciais e parâmetros.
+
+    O arquivo deve seguir o formato 'CHAVE=VALOR'. Caso o arquivo não
+    exista, valores padrão de segurança serão retornados para evitar
+    falhas de importação no módulo principal.
+
     Returns:
-        dict: Dicionário com credenciais e preferências.
+        dict: Mapeamento de configurações como MATRICULA, SENHA, e nomes de abas
+              (incluindo a aba da planilha GERAL).
     """
     config = {
         "MATRICULA": "",
         "SENHA": "",
         "PREFIXO_PLANILHA": "Controle de Vendas -- ",
-        "NOME_ABA": "JANEIRO"
+        "NOME_ABA": "JANEIRO",
+        "ANO_GERAL": "2026"
     }
 
     if not os.path.exists(ARQUIVO_CONFIG):
-        return None
+        return config
 
     try:
         with open(ARQUIVO_CONFIG, 'r', encoding='utf-8') as f:
             for linha in f:
                 if '=' in linha:
                     chave, valor = linha.split('=', 1)
-                    valor_limpo = valor.replace('\n', '').replace('\r', '')
-                    config[chave.strip()] = valor_limpo
+                    config[chave.strip()] = valor.strip()
         return config
     except OSError:
-        return None
+        return config
 
 
-# Carrega as configurações globais ao importar o módulo
+# Inicialização das constantes de ambiente e credenciais
 CONFIG = carregar_configuracoes()
-USUARIO_LOGIN = CONFIG.get("MATRICULA") if CONFIG else ""
-SENHA_LOGIN = CONFIG.get("SENHA") if CONFIG else ""
-PREFIXO_PLANILHA = CONFIG.get("PREFIXO_PLANILHA") if CONFIG else ""
-NOME_ABA = CONFIG.get("NOME_ABA") if CONFIG else ""
+USUARIO_LOGIN = CONFIG.get("MATRICULA")
+SENHA_LOGIN = CONFIG.get("SENHA")
+PREFIXO_PLANILHA = CONFIG.get("PREFIXO_PLANILHA")
+NOME_ABA = CONFIG.get("NOME_ABA")
+NOME_ABA_GERAL = CONFIG.get("ANO_GERAL")
 
 
 def carregar_pendentes() -> dict:
     """
-    Carrega o arquivo JSON com os contratos pendentes de reanálise.
+    Carrega o arquivo JSON com os contratos que aguardam pagamento.
     
     Returns:
-        dict: Dicionário contendo o estado dos contratos pendentes.
+        dict: Dicionário contendo o estado atual dos contratos pendentes.
     """
     if os.path.exists(ARQUIVO_PENDENTES):
         try:
@@ -84,7 +95,7 @@ def carregar_pendentes() -> dict:
 
 def salvar_pendentes(dados: dict) -> None:
     """
-    Salva o dicionário de contratos pendentes no arquivo JSON.
+    Persiste o dicionário de contratos pendentes no arquivo JSON.
     
     Args:
         dados (dict): Dicionário atualizado de contratos pendentes.
@@ -97,14 +108,14 @@ def adicionar_para_reanalise(contrato: str, vendedor_nome: str,
                              vendedor_tel: str, nome_planilha: str,
                              origem: str, dados_completos: dict) -> None:
     """
-    Adiciona um contrato que ainda não foi pago ao arquivo de reanálise.
+    Adiciona um contrato que ainda não foi pago à fila de monitoramento contínuo.
     
     Args:
-        contrato (str): Número do contrato.
+        contrato (str): Número do contrato (ex: 22134896).
         vendedor_nome (str): Nome do vendedor associado.
-        vendedor_tel (str): Telefone do vendedor para feedback.
-        nome_planilha (str): Nome do arquivo do Google Sheets.
-        origem (str): Origem da venda (ex: Tráfego).
+        vendedor_tel (str): Telefone do vendedor para envio de feedback.
+        nome_planilha (str): Nome do arquivo individual do Google Sheets.
+        origem (str): Origem da venda.
         dados_completos (dict): Dados brutos provenientes do CSV da fila.
     """
     pendentes = carregar_pendentes()
@@ -124,14 +135,14 @@ def salvar_historico_concluido(contrato: str, nome_planilha: str,
                                vendedor_nome: str, vendedor_tel: str,
                                status_pag: str) -> None:
     """
-    Grava os dados do contrato processado no histórico de concluídos.
+    Grava os dados do contrato definitivamente processado no histórico local (CSV).
     
     Args:
         contrato (str): Número do contrato processado.
-        nome_planilha (str): Nome da planilha de destino.
+        nome_planilha (str): Nome da planilha(s) de destino.
         vendedor_nome (str): Nome do vendedor.
         vendedor_tel (str): Telefone do vendedor.
-        status_pag (str): Status final do pagamento.
+        status_pag (str): Status final do pagamento detectado.
     """
     existe = os.path.exists(ARQUIVO_HISTORICO_SUCESSO)
     try:
@@ -152,74 +163,83 @@ def salvar_historico_concluido(contrato: str, nome_planilha: str,
         print(f"   [ERRO HISTÓRICO] {e}")
 
 
-def conectar_google_sheets(nome_planilha: str):
+def conectar_google_sheets(nome_planilha: str, aba: str):
     """
-    Autentica e estabelece conexão com uma planilha específica do Google Sheets.
-    
+    Estabelece uma conexão autenticada com uma planilha e aba específica.
+
+    Utiliza as credenciais do arquivo 'credentials.json' para acessar a API
+    do Google Drive e Planilhas.
+
     Args:
-        nome_planilha (str): Título exato do documento no Google Drive.
-        
+        nome_planilha (str): O título exato da planilha no Google Drive.
+        aba (str): O nome da aba (worksheet) desejada.
+
     Returns:
-        Worksheet|str|None: Objeto da aba se sucesso, 'NAO_ENCONTRADA',
-                            ou None para outros erros.
+        gspread.models.Worksheet: Objeto para manipulação da aba.
+        None: Retornado em caso de falha na conexão ou se a planilha não existir.
     """
     scope = [
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive"
     ]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(
-        'credentials.json', scope
-    )
-    cliente = gspread.authorize(creds)
-
     try:
-        planilha = cliente.open(nome_planilha)
-        return planilha.worksheet(NOME_ABA)
-    except gspread.SpreadsheetNotFound:
-        return "NAO_ENCONTRADA"
+        creds = ServiceAccountCredentials.from_json_keyfile_name(
+            'credentials.json', scope
+        )
+        cliente = gspread.authorize(creds)
+        return cliente.open(nome_planilha).worksheet(aba)
     except Exception:  # pylint: disable=broad-exception-caught
         return None
 
 
-def encontrar_proxima_linha_vazia(sheet) -> int:
+def encontrar_proxima_linha_vazia(sheet, start_row: int, check_col: int) -> int:
     """
-    Itera pela planilha do Google Sheets para achar a próxima linha livre.
-    Começa na linha 12.
-    
-    Args:
-        sheet (Worksheet): Objeto da aba do Google Sheets conectada.
-        
-    Returns:
-        int: Número da próxima linha em branco.
-    """
-    coluna_d = sheet.col_values(4)
-    if len(coluna_d) < 12:
-        return 12
+    Analisa a planilha para encontrar a primeira linha disponível para escrita.
 
-    for i in range(11, len(coluna_d) + 20):
+    A função varre uma coluna chave (ex: coluna D para vendedor, C para Geral)
+    para determinar onde os novos dados devem ser inseridos sem sobrescrever
+    os registros já existentes.
+
+    Args:
+        sheet (gspread.models.Worksheet): A aba ativa do Google Sheets.
+        start_row (int): A linha onde a tabela começa (12 para Vendedor, 7 para Geral).
+        check_col (int): O índice da coluna base para verificar se a linha está vazia.
+
+    Returns:
+        int: O índice da próxima linha em branco encontrada.
+    """
+    coluna_alvo = sheet.col_values(check_col)
+
+    # Se a coluna estiver menor que a linha de início, o início está livre
+    if len(coluna_alvo) < start_row:
+        return start_row
+
+    for i in range(start_row - 1, len(coluna_alvo) + 20):
         try:
-            if i >= len(coluna_d) or not coluna_d[i]:
+            if i >= len(coluna_alvo) or not coluna_alvo[i]:
                 return i + 1
         except Exception:  # pylint: disable=broad-exception-caught
             return i + 1
 
-    return 12
+    return start_row
 
 
-def encontrar_linha_do_contrato(sheet, contrato: str) -> int:
+def encontrar_linha_do_contrato(sheet, contrato: str, col_idx: int) -> int:
     """
-    Varre a coluna de contratos (M) para localizar a linha de um contrato.
-    
+    Localiza o índice da linha de um contrato específico para atualizações (Reanálise).
+
     Args:
-        sheet (Worksheet): Objeto da aba do Google Sheets.
-        contrato (str): Número do contrato para busca.
-        
+        sheet (gspread.models.Worksheet): A aba ativa.
+        contrato (str): O número do contrato a ser buscado.
+        col_idx (int): O índice da coluna onde o contrato reside (13 para Vendedor, 12 para Geral).
+
     Returns:
-        int|None: Número da linha encontrada ou None se falhar/inexistente.
+        int: O índice numérico da linha encontrada.
+        None: Se o contrato não for localizado na planilha.
     """
     try:
-        coluna_m = sheet.col_values(13)
-        for i, valor in enumerate(coluna_m, start=1):
+        valores = sheet.col_values(col_idx)
+        for i, valor in enumerate(valores, start=1):
             if str(contrato).strip() == str(valor).strip():
                 return i
     except Exception as e:  # pylint: disable=broad-exception-caught
@@ -233,7 +253,7 @@ def limpar_inteiro(texto: str) -> int:
     Extrai todos os dígitos de uma string e retorna como inteiro.
     
     Args:
-        texto (str): Texto contendo números (ex: '001').
+        texto (str): Texto contendo números (ex: '001', '1 parcela').
         
     Returns:
         int: O número formatado como inteiro (ex: 1).
@@ -247,13 +267,13 @@ def limpar_inteiro(texto: str) -> int:
 
 def limpar_valor(texto: str) -> float:
     """
-    Converte uma string de valor monetário (R$ 1.500,00) em formato float.
+    Converte uma string de valor monetário (ex: R$ 1.500,00) em formato float.
     
     Args:
-        texto (str): String com formato de moeda.
+        texto (str): String com formato de moeda padrão Brasil.
         
     Returns:
-        float: Valor numérico limpo e computável.
+        float: Valor numérico limpo e computável para planilhas.
     """
     try:
         match = re.search(r'([\d\.]+,\d{2})', str(texto))
@@ -267,14 +287,14 @@ def limpar_valor(texto: str) -> float:
 
 def fazer_login_automatico(driver) -> bool:
     """
-    Acessa a intranet e submete os dados de login.
-    Fica em espera aguardando resolução manual do Captcha.
+    Acessa a intranet da Tradição e submete os dados de login.
+    Fica em estado de espera aguardando a resolução manual do Captcha.
     
     Args:
         driver (WebDriver): Instância do navegador Selenium.
         
     Returns:
-        bool: True se logou com sucesso, False em caso de falha.
+        bool: True se logou com sucesso, False em caso de falha de credenciais.
     """
     if not USUARIO_LOGIN or not SENHA_LOGIN:
         return False
@@ -297,7 +317,7 @@ def fazer_login_automatico(driver) -> bool:
         driver.find_element(By.ID, "j_password").send_keys(SENHA_LOGIN)
 
         print("\n" + "=" * 60)
-        print(" AGUARDANDO CAPTCHA... POR FAVOR RESOLVA!")
+        print(" AGUARDANDO CAPTCHA... POR FAVOR RESOLVA NO NAVEGADOR!")
         print("=" * 60 + "\n")
 
         WebDriverWait(driver, 600).until(
@@ -305,7 +325,7 @@ def fazer_login_automatico(driver) -> bool:
         )
         driver.switch_to.default_content()
 
-        print("\n LOGIN DETECTADO!")
+        print("\n LOGIN DETECTADO COM SUCESSO!")
         try:
             winsound.Beep(1000, 500)
         except RuntimeError:
@@ -319,13 +339,14 @@ def fazer_login_automatico(driver) -> bool:
 def buscar_contrato(driver, contrato: str) -> bool:
     """
     Navega pelos menus laterais da intranet e executa a pesquisa pelo contrato.
+    Implementa "Pausa Humana" para evitar bloqueios por excesso de velocidade.
     
     Args:
         driver (WebDriver): Instância ativa do navegador.
         contrato (str): O contrato de 8 dígitos a ser localizado.
         
     Returns:
-        bool: True se acessou a tela do consorciado com sucesso, False em erro.
+        bool: True se acessou a ficha do consorciado com sucesso, False em erro.
     """
     driver.switch_to.default_content()
     try:
@@ -391,14 +412,14 @@ def buscar_contrato(driver, contrato: str) -> bool:
 
 def verificar_apenas_pagamento(driver) -> bool:
     """
-    Lê a informação de parcelas na tela principal sem navegação adicional.
-    Útil para verificações rápidas no modo turbo.
+    Lê a informação de parcelas pagas na tela principal da cota.
+    Evita navegação extra, otimizando o ciclo de reanálise contínua.
     
     Args:
-        driver (WebDriver): Navegador na tela de dados do contrato.
+        driver (WebDriver): Navegador estacionado na tela de dados do contrato.
         
     Returns:
-        bool: True se parcela paga for maior que zero.
+        bool: True se o número de parcelas pagas for maior que zero.
     """
     try:
         xpath_pagas = "//td[contains(text(), 'Parcelas Pagas:')]/following-sibling::td"
@@ -411,13 +432,14 @@ def verificar_apenas_pagamento(driver) -> bool:
 
 def extrair_dados_completos(driver) -> dict:
     """
-    Raspa as informações cadastrais completas do cliente nas telas.
+    Raspa todas as informações cadastrais e financeiras do cliente.
+    Navega até a aba 'Telefones' para coletar o número de contato do cliente.
     
     Args:
-        driver (WebDriver): Navegador na aba Cota inicial.
+        driver (WebDriver): Navegador na aba inicial da Cota.
         
     Returns:
-        dict: Dicionário contendo nome, crédito, venda, grupo, cota e telefone.
+        dict: Dicionário completo com chaves (nome, credito, telefone, etc).
     """
     dados = {
         'credito': 0.00,
@@ -484,24 +506,25 @@ def extrair_dados_completos(driver) -> dict:
     return dados
 
 
-def atualizar_planilha(sheet, row_csv: dict,
-                       dados_site: dict, contrato: str) -> str:
+def atualizar_planilha_vendedor(sheet, row_csv: dict,
+                                dados_site: dict, contrato: str) -> str:
     """
-    Estrutura a string de atualização e envia para o Google Sheets.
+    Registra ou atualiza os dados na planilha padrão do vendedor.
+    Padrão de Início: Coluna B, Linha 12.
     
     Args:
-        sheet (Worksheet): Instância da aba da planilha.
-        row_csv (dict|Series): Linha original capturada da Fila/Monitor.
+        sheet (Worksheet): Instância da aba da planilha do vendedor.
+        row_csv (dict): Dados originados do WhatsApp/Fila.
         dados_site (dict): Dicionário com dados raspados da intranet.
         contrato (str): Número do contrato para registro.
         
     Returns:
         str: Feedback de status final ("1º Parcela Paga" ou string vazia).
     """
-    linha = encontrar_proxima_linha_vazia(sheet)
+    linha = encontrar_proxima_linha_vazia(sheet, start_row=12, check_col=4)
     status_pag = "1º Parcela Paga" if dados_site['pago'] else ""
 
-    p1 = [
+    dados_cadastrais = [
         str(dados_site['data_venda']),
         str(dados_site['nome']),
         str(dados_site['telefone']),
@@ -518,7 +541,7 @@ def atualizar_planilha(sheet, row_csv: dict,
     except (ValueError, TypeError):
         pass
 
-    p2 = [
+    dados_financeiros = [
         dados_site['credito'],
         lance_val,
         "",
@@ -527,10 +550,66 @@ def atualizar_planilha(sheet, row_csv: dict,
         str(dados_site['cota'])
     ]
 
+    # Atualização por ranges para otimizar tempo de API
     sheet.update_cell(linha, 2, status_pag)
-    sheet.update(range_name=f"D{linha}:H{linha}", values=[p1],
+    sheet.update(range_name=f"D{linha}:H{linha}", values=[dados_cadastrais],
                  value_input_option='USER_ENTERED')
-    sheet.update(range_name=f"J{linha}:O{linha}", values=[p2],
+    sheet.update(range_name=f"J{linha}:O{linha}", values=[dados_financeiros],
+                 value_input_option='USER_ENTERED')
+
+    return status_pag
+
+
+def atualizar_planilha_geral(sheet, row_csv: dict,
+                             dados_site: dict, contrato: str) -> str:
+    """
+    Registra ou atualiza os dados na planilha GERAL (Centralizada).
+    Padrão de Início: Coluna A, Linha 7.
+    Todas as colunas são deslocadas 1 casa para a esquerda em relação à individual.
+    
+    Args:
+        sheet (Worksheet): Instância da aba da planilha Geral (ex: Ano 2026).
+        row_csv (dict): Dados originados do WhatsApp/Fila.
+        dados_site (dict): Dicionário com dados raspados da intranet.
+        contrato (str): Número do contrato para registro.
+        
+    Returns:
+        str: Feedback de status final ("1º Parcela Paga" ou string vazia).
+    """
+    linha = encontrar_proxima_linha_vazia(sheet, start_row=7, check_col=3)
+    status_pag = "1º Parcela Paga" if dados_site['pago'] else ""
+
+    dados_cadastrais = [
+        str(dados_site['data_venda']),
+        str(dados_site['nome']),
+        str(dados_site['telefone']),
+        "",
+        str(row_csv.get('origem', ''))
+    ]
+
+    lance_val = 0.00
+    try:
+        str_lance = str(row_csv.get('lance livre', 0))
+        val_limpo = str_lance.replace("R$", "").replace(".", "")\
+                             .replace(",", ".").strip()
+        lance_val = float(val_limpo)
+    except (ValueError, TypeError):
+        pass
+
+    dados_financeiros = [
+        dados_site['credito'],
+        lance_val,
+        "",
+        str(contrato),
+        str(dados_site['grupo']),
+        str(dados_site['cota'])
+    ]
+
+    # Atualização com ranges deslocados (-1 Coluna base)
+    sheet.update_cell(linha, 1, status_pag)
+    sheet.update(range_name=f"C{linha}:G{linha}", values=[dados_cadastrais],
+                 value_input_option='USER_ENTERED')
+    sheet.update(range_name=f"I{linha}:N{linha}", values=[dados_financeiros],
                  value_input_option='USER_ENTERED')
 
     return status_pag
@@ -539,12 +618,14 @@ def atualizar_planilha(sheet, row_csv: dict,
 def manter_sessao_viva(driver) -> bool:
     """
     Realiza um clique silencioso no menu para evitar timeout do servidor.
+    Dessa forma, o robô pode ficar inativo na madrugada sem precisar
+    realizar todo o fluxo de login + captcha de manhã.
     
     Args:
         driver (WebDriver): Navegador em execução.
         
     Returns:
-        bool: True se conseguiu renovar o tempo, False se perdeu o login.
+        bool: True se conseguiu renovar o tempo, False se perdeu a conexão/login.
     """
     try:
         driver.switch_to.default_content()
@@ -558,9 +639,8 @@ def manter_sessao_viva(driver) -> bool:
         time.sleep(PAUSA_HUMANA)
 
         hora_atual = datetime.now().strftime('%H:%M:%S')
-        print(f"[{hora_atual}] Keep-Alive: Sessão renovada.")
+        print(f"[{hora_atual}] Keep-Alive: Sessão renovada com sucesso.")
         return True
 
-    # CORREÇÃO PYLINT: Informando que esta exceção é intencional
     except Exception:  # pylint: disable=broad-exception-caught
         return False
