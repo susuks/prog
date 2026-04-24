@@ -62,7 +62,9 @@ def carregar_configuracoes() -> dict:
             for linha in f:
                 if '=' in linha:
                     chave, valor = linha.split('=', 1)
-                    config[chave.strip()] = valor.strip()
+                    # CORREÇÃO: Remove apenas quebra de linha, mantendo o espaço final intacto
+                    valor_limpo = valor.replace('\n', '').replace('\r', '')
+                    config[chave.strip()] = valor_limpo
         return config
     except OSError:
         return config
