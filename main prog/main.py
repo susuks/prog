@@ -43,11 +43,11 @@ def loop_servico():
 
 # --- CONFIGURAÇÃO DO MODO FANTASMA (HEADLESS) ---
     chrome_options = Options()
-    chrome_options.add_argument("--headless=new") # Roda invisível
+    #chrome_options.add_argument("--headless=new") # Roda invisível
     chrome_options.add_argument("--no-sandbox") # Essencial para Linux
     chrome_options.add_argument("--disable-dev-shm-usage") # Evita travamento por falta de memória RAM
-    chrome_options.add_argument("--window-size=1920,1080") # Engana o site fingindo ter uma tela
-    
+    #chrome_options.add_argument("--window-size=1920,1080") # Engana o site fingindo ter uma tela
+
     driver = webdriver.Chrome(
         service=Service(ChromeDriverManager().install()), 
         options=chrome_options
