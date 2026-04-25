@@ -14,7 +14,6 @@ import json
 import re
 import time
 from datetime import datetime
-import winsound
 
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -328,10 +327,6 @@ def fazer_login_automatico(driver) -> bool:
         driver.switch_to.default_content()
 
         print("\n LOGIN DETECTADO COM SUCESSO!")
-        try:
-            winsound.Beep(1000, 500)
-        except RuntimeError:
-            pass
 
         return True
     except Exception:  # pylint: disable=broad-exception-caught
