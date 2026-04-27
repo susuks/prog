@@ -1,10 +1,6 @@
 """
 Motor Principal de Automação de Coleta e Reanálise de Consórcio V2.
-
-Este script gerencia o ciclo de vida dos contratos: desde a captura inicial
-no WhatsApp (via arquivo de fila) até o monitoramento contínuo de pagamentos.
-Ele orquestra a navegação no portal da Tradição e o registro sincronizado
-em múltiplas planilhas do Google Sheets (Individual do Vendedor e Geral).
+(Versão Stealth com Undetected Chromedriver)
 """
 
 import os
@@ -12,11 +8,8 @@ import time
 import shutil
 import json
 import pandas as pd
-from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from webdriver_manager.chrome import ChromeDriverManager
+import undetected_chromedriver as uc
 
 # Importação explícita do módulo de utilitários local
 from coletor_utils import (
@@ -38,7 +31,7 @@ def injetar_cookies(driver):
 
     if not os.path.exists(arquivo_cookie):
         print("   -> [ERRO] O arquivo cookies.json NÃO ESTÁ AQUI!")
-        print("   -> Dica: O SCP pode ter jogado na pasta errada. Faça o envio manualmente ou corrija o caminho.")
+        print("   -> Dica: Envie o arquivo gerado pelo PC via SCP.")
         return False
 
     try:
@@ -50,54 +43,42 @@ def injetar_cookies(driver):
             cookies = json.load(f)
             print(f"   -> Lidos {len(cookies)} cookies. Colocando o crachá no robô...")
             for cookie in cookies:
-                # O Selenium no Linux às vezes engasga com essa chave do Windows, então nós limpamos:
                 if 'sameSite' in cookie:
                     del cookie['sameSite']
                 driver.add_cookie(cookie)
 
-        print("   -> Crachá colocado! Atualizando a página para ver se o Leão de Chácara aceita...")
+        print("   -> Crachá colocado! Atualizando a página (Modo Stealth)...")
         driver.refresh()
         time.sleep(4)
 
-        # Verifica se fomos jogados de volta pra tela de login
         try:
             driver.switch_to.default_content()
             driver.find_element(By.ID, "j_username")
-            print("   -> [FALHA] O site recusou o nosso crachá e exigiu login de novo.")
+            print("   -> [FALHA] O site recusou o crachá mesmo no modo stealth.")
             return False
-        except Exception: # pylint: disable=broad-exception-caught
+        except Exception:  # pylint: disable=broad-exception-caught
             print("   -> [SUCESSO] O campo de login sumiu. Estamos dentro!")
             return True
 
-    except Exception as e: # pylint: disable=broad-exception-caught
-        print(f"   -> [ERRO GRAVE] O Selenium travou ao processar os cookies: {e}")
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        print(f"   -> [ERRO GRAVE] Falha ao processar os cookies: {e}")
         return False
 
 
 def loop_servico():
     """
     Loop de execução infinita para processamento de filas e reanálise.
-    O loop é dividido em três fases principais:
-    1. Processamento de Novos Contratos.
-    2. Reanálise Contínua.
-    3. Manutenção (Keep-Alive).
     """
-    print("\n>>> INICIANDO SISTEMA CENTRALIZADO V2 (Bypass por Cookies) <<<")
+    print("\n>>> INICIANDO SISTEMA CENTRALIZADO V2 (Modo Stealth UC) <<<")
 
-    # --- CONFIGURAÇÃO DO MODO FANTASMA (HEADLESS) ---
-    chrome_options = Options()
-    chrome_options.add_argument("--headless=new") # Roda invisível
-    chrome_options.add_argument("--no-sandbox") # Essencial para Linux
-    chrome_options.add_argument("--disable-dev-shm-usage") # Evita travamento por falta de memória RAM
-    chrome_options.add_argument("--window-size=1920,1080") # Engana o site fingindo ter uma tela
+    # --- CONFIGURAÇÃO DO MODO STEALTH (UNDETECTED) ---
+    options = uc.ChromeOptions()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--window-size=1920,1080")
 
-    mascara = "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    chrome_options.add_argument(mascara)
-
-    driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=chrome_options
-    )
+    driver = uc.Chrome(options=options)
     # ------------------------------------------------
 
     autenticado = False
@@ -115,19 +96,18 @@ def loop_servico():
                     autenticado = True
                     ultimo_keep_alive = time.time()
                 else:
-                    print("[FALHA] Crachá (Cookies) ausente ou expirado.")
-                    print("--> AÇÃO NECESSÁRIA: Envie um novo 'cookies.json' para o servidor.")
+                    print("[FALHA] Crachá (Cookies) ausente ou rejeitado.")
+                    print("--> AÇÃO: Envie um novo 'cookies.json' via gerador local.")
                     time.sleep(60)
                     continue
 
             # -------------------------------------------------------------
-            # FASE 1: REGISTRO DE NOVOS CONTRATOS (PRIORIDADE)
+            # FASE 1: REGISTRO DE NOVOS CONTRATOS
             # -------------------------------------------------------------
             if os.path.exists(ARQUIVO_FILA):
                 try:
                     shutil.move(ARQUIVO_FILA, ARQUIVO_EM_PROCESSAMENTO)
                 except OSError:
-                    # Aguarda caso o arquivo esteja travado pelo Node.js
                     time.sleep(1)
                     continue
 
@@ -136,7 +116,6 @@ def loop_servico():
                     df = pd.read_csv(ARQUIVO_EM_PROCESSAMENTO, sep=',', dtype=str)
                     df.columns = [c.strip() for c in df.columns]
                 except Exception:  # pylint: disable=broad-exception-caught
-                    # Se o CSV estiver vazio ou corrompido, limpa o arquivo temporário
                     if os.path.exists(ARQUIVO_EM_PROCESSAMENTO):
                         os.remove(ARQUIVO_EM_PROCESSAMENTO)
                     continue
@@ -152,7 +131,6 @@ def loop_servico():
 
                     print(f"\n[NOVO] Processando Contrato: {contrato} (Vendedor: {vendedor})...")
 
-                    # Conexão independente com as duas planilhas alvo
                     nome_planilha_vendedor = f"{PREFIXO_PLANILHA}{vendedor}"
                     nome_planilha_geral = f"{PREFIXO_PLANILHA}GERAL"
 
@@ -161,31 +139,23 @@ def loop_servico():
 
                     if buscar_contrato(driver, contrato):
                         dados = extrair_dados_completos(driver)
-
                         anotou_vend = False
                         anotou_geral = False
 
-                        # Escrita protegida na planilha do Vendedor
                         if sheet_vend:
                             try:
                                 atualizar_planilha_vendedor(sheet_vend, row.to_dict(), dados, contrato)
                                 anotou_vend = True
                             except Exception as e:  # pylint: disable=broad-exception-caught
-                                print(f"   [ERRO API] Falha ao escrever na planilha do vendedor: {e}")
-                        else:
-                            print(f"   [AVISO] Planilha '{nome_planilha_vendedor}' não encontrada ou inacessível.")
+                                print(f"   [ERRO API] Falha planilha vendedor: {e}")
 
-                        # Escrita protegida na planilha Geral
                         if sheet_geral:
                             try:
                                 atualizar_planilha_geral(sheet_geral, row.to_dict(), dados, contrato)
                                 anotou_geral = True
                             except Exception as e:  # pylint: disable=broad-exception-caught
-                                print(f"   [ERRO API] Falha ao escrever na planilha GERAL: {e}")
-                        else:
-                            print(f"   [AVISO] Planilha '{nome_planilha_geral}' não encontrada ou inacessível.")
+                                print(f"   [ERRO API] Falha planilha GERAL: {e}")
 
-                        # Validação de Sucesso Absoluto
                         if anotou_vend or anotou_geral:
                             destino_log = ""
                             if anotou_vend and anotou_geral:
@@ -209,33 +179,26 @@ def loop_servico():
                                     nome_planilha_vendedor, origem, row.to_dict()
                                 )
                         else:
-                            print("   [CRÍTICO] Nenhuma planilha foi atualizada. O contrato NÃO será salvo no histórico.")
-                            print("   [RECUPERAÇÃO] Devolvendo contrato para a fila para nova tentativa no próximo ciclo...")
-
-                            # Recria a fila se ela não existir e devolve o contrato intacto
+                            print("   [CRÍTICO] Falha ao gravar. Devolvendo à fila...")
                             if not os.path.exists(ARQUIVO_FILA):
                                 with open(ARQUIVO_FILA, 'w', encoding='utf-8') as f_fila:
                                     f_fila.write("contrato,origem,vendedor,lance livre,telefone\n")
 
                             with open(ARQUIVO_FILA, 'a', encoding='utf-8') as f_fila:
-                                linha_csv = f"{row.get('contrato', '')},{row.get('origem', '')},{row.get('vendedor', '')},{row.get('lance livre', '')},{row.get('telefone', '')}\n"
-                                f_fila.write(linha_csv)
+                                f_fila.write(f"{row.get('contrato', '')},{row.get('origem', '')},{row.get('vendedor', '')},{row.get('lance livre', '')},{row.get('telefone', '')}\n")
                     else:
                         print(f"   [ERRO] Contrato {contrato} não localizado no portal.")
 
-                # Limpeza do lote processado
                 if os.path.exists(ARQUIVO_EM_PROCESSAMENTO):
                     os.remove(ARQUIVO_EM_PROCESSAMENTO)
 
             # -------------------------------------------------------------
-            # FASE 2: REANÁLISE DE PAGAMENTOS (LOOP CONTÍNUO)
+            # FASE 2: REANÁLISE DE PAGAMENTOS
             # -------------------------------------------------------------
             pendentes = carregar_pendentes()
             mudou_pendentes = False
 
-            # Converte para lista de tuplas para evitar erro de alteração de dicionário durante iteração
             for contrato, info in list(pendentes.items()):
-                # Interrupção imediata se chegar lote novo
                 if os.path.exists(ARQUIVO_FILA):
                     break
 
@@ -247,12 +210,10 @@ def loop_servico():
 
                 if buscar_contrato(driver, contrato):
                     if verificar_apenas_pagamento(driver):
-                        print("   [PAGAMENTO DETECTADO] Atualizando status nas planilhas...")
-
+                        print("   [PAGAMENTO DETECTADO] Atualizando planilhas...")
                         anotou_vend = False
                         anotou_geral = False
 
-                        # Atualiza Planilha Vendedor (Coluna M / 13)
                         sheet_v = conectar_google_sheets(info['nome_planilha'], NOME_ABA)
                         if sheet_v:
                             linha_v = encontrar_linha_do_contrato(sheet_v, contrato, col_idx=13)
@@ -260,12 +221,9 @@ def loop_servico():
                                 try:
                                     sheet_v.update_cell(linha_v, 2, "1º Parcela Paga")
                                     anotou_vend = True
-                                except Exception as e:  # pylint: disable=broad-exception-caught
-                                    print(f"   [ERRO API] Falha Vendedor: {e}")
-                            else:
-                                print("   [AVISO] Contrato não achado na planilha individual.")
+                                except Exception:  # pylint: disable=broad-exception-caught
+                                    pass
 
-                        # Atualiza Planilha Geral (Coluna L / 12)
                         sheet_g = conectar_google_sheets(f"{PREFIXO_PLANILHA}GERAL", NOME_ABA_GERAL)
                         if sheet_g:
                             linha_g = encontrar_linha_do_contrato(sheet_g, contrato, col_idx=12)
@@ -273,12 +231,9 @@ def loop_servico():
                                 try:
                                     sheet_g.update_cell(linha_g, 1, "1º Parcela Paga")
                                     anotou_geral = True
-                                except Exception as e:  # pylint: disable=broad-exception-caught
-                                    print(f"   [ERRO API] Falha GERAL: {e}")
-                            else:
-                                print("   [AVISO] Contrato não achado na planilha GERAL.")
+                                except Exception:  # pylint: disable=broad-exception-caught
+                                    pass
 
-                        # Validação de Sucesso Absoluto na Reanálise
                         if anotou_vend or anotou_geral:
                             destino_log = ""
                             if anotou_vend and anotou_geral:
@@ -292,37 +247,31 @@ def loop_servico():
                                 contrato, destino_log,
                                 info['vendedor_nome'], info['vendedor_tel'], "1º Parcela Paga (Reanálise)"
                             )
-                            # Remove da fila de pendentes apenas se teve sucesso
                             del pendentes[contrato]
-                        else:
-                            print(" [ERRO] Falha ao atualizar planilhas. Mantendo na fila de reanálise para tentar depois.")
-                            # O contrato NÃO é deletado, então ele tentará novamente na próxima rodada
                     else:
-                        # Se não pagou, verifica se excedeu o limite de tentativas
                         if info['tentativas'] >= MAX_TENTATIVAS:
-                            print(f" [EXPIROU] Contrato {contrato} atingiu o limite de tentativas.")
+                            print(f" [EXPIROU] Contrato {contrato} atingiu o limite.")
                             del pendentes[contrato]
                 else:
-                    # Se não achou o contrato (cota excluída/cancelada), limpa da fila
-                    print("   [NÃO ENCONTRADO] Cota indisponível no portal. Removendo da fila.")
+                    print("   [NÃO ENCONTRADO] Cota indisponível no portal.")
                     del pendentes[contrato]
 
             if mudou_pendentes:
                 salvar_pendentes(pendentes)
 
             # -------------------------------------------------------------
-            # FASE 3: MANUTENÇÃO DE SESSÃO (KEEP-ALIVE)
+            # FASE 3: MANUTENÇÃO DE SESSÃO
             # -------------------------------------------------------------
             if (time.time() - ultimo_keep_alive) > TEMPO_INATIVIDADE_MAXIMO:
                 if not manter_sessao_viva(driver):
-                    print("[AVISO] Sessão expirada ou perdida. Forçando Relogin...")
-                    autenticado = False # Derruba a sessão para a Portaria barrar no próximo loop
+                    print("[AVISO] Sessão expirada. Voltando para Portaria...")
+                    autenticado = False
                 ultimo_keep_alive = time.time()
 
             time.sleep(1)
 
         except Exception as e:  # pylint: disable=broad-exception-caught
-            print(f"[ERRO GERAL NO LOOP] A execução foi protegida. Detalhe: {e}")
+            print(f"[ERRO GERAL NO LOOP] Execução protegida. Detalhe: {e}")
             time.sleep(2)
 
 
