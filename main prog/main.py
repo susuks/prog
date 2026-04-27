@@ -49,7 +49,7 @@ def loop_servico():
     #chrome_options.add_argument("--window-size=1920,1080") # Engana o site fingindo ter uma tela
 
     driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()), 
+        service=Service(ChromeDriverManager().install()),
         options=chrome_options
     )
     # ------------------------------------------------
