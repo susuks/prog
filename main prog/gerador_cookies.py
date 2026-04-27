@@ -31,7 +31,15 @@ def clonar_e_enviar():
     usuario = credenciais.get("MATRICULA", "")
     senha = credenciais.get("SENHA", "")
 
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
+    # === APLICANDO A MÁSCARA ===
+    opcoes = webdriver.ChromeOptions()
+    mascara = "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    opcoes.add_argument(mascara)
+
+    driver = webdriver.Chrome(
+        service=Service(ChromeDriverManager().install()), 
+        options=opcoes
+    )
     driver.get("https://intranet.consorciotradicao.com.br/autocred/")
 
     # Tentativa de auto-preenchimento

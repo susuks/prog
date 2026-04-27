@@ -91,6 +91,9 @@ def loop_servico():
     chrome_options.add_argument("--disable-dev-shm-usage") # Evita travamento por falta de memória RAM
     chrome_options.add_argument("--window-size=1920,1080") # Engana o site fingindo ter uma tela
 
+    mascara = "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    chrome_options.add_argument(mascara)
+
     driver = webdriver.Chrome(
         service=Service(ChromeDriverManager().install()),
         options=chrome_options
