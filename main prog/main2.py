@@ -34,34 +34,43 @@ def injetar_cookies(driver):
     """Lê o arquivo cookies.json, injeta no navegador e valida o acesso."""
     arquivo_cookie = "cookies.json"
 
+    print(f"   -> Procurando '{arquivo_cookie}' no diretório: {os.getcwd()}")
+
     if not os.path.exists(arquivo_cookie):
+        print("   -> [ERRO] O arquivo cookies.json NÃO ESTÁ AQUI!")
+        print("   -> Dica: O SCP pode ter jogado na pasta errada. Faça o envio manualmente ou corrija o caminho.")
         return False
 
     try:
-        # Acessa a raiz para o Chrome aceitar carregar cookies daquele domínio
+        print("   -> Arquivo encontrado! Abrindo a porta do site...")
         driver.get("https://intranet.consorciotradicao.com.br/autocred/")
         time.sleep(2)
 
-        # Injeta as chaves clonadas
         with open(arquivo_cookie, "r", encoding="utf-8") as f:
             cookies = json.load(f)
+            print(f"   -> Lidos {len(cookies)} cookies. Colocando o crachá no robô...")
             for cookie in cookies:
+                # O Selenium no Linux às vezes engasga com essa chave do Windows, então nós limpamos:
+                if 'sameSite' in cookie:
+                    del cookie['sameSite']
                 driver.add_cookie(cookie)
 
-        # Atualiza a página (se o crachá for válido, ele entra no sistema)
+        print("   -> Crachá colocado! Atualizando a página para ver se o Leão de Chácara aceita...")
         driver.refresh()
         time.sleep(4)
 
-        # Verifica se estamos na tela de login (procurando o campo de usuário)
+        # Verifica se fomos jogados de volta pra tela de login
         try:
             driver.switch_to.default_content()
             driver.find_element(By.ID, "j_username")
+            print("   -> [FALHA] O site recusou o nosso crachá e exigiu login de novo.")
             return False
         except Exception: # pylint: disable=broad-exception-caught
+            print("   -> [SUCESSO] O campo de login sumiu. Estamos dentro!")
             return True
 
     except Exception as e: # pylint: disable=broad-exception-caught
-        print(f"[ERRO] Falha na manipulação do arquivo de cookies: {e}")
+        print(f"   -> [ERRO GRAVE] O Selenium travou ao processar os cookies: {e}")
         return False
 
 
