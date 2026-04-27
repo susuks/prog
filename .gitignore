@@ -28,6 +28,7 @@ fila_vendas.csv
 *.log
 temp_processando.csv
 erro_site.png
+cookies.json
 
 # Arquivos do sistema
 .DS_Store
