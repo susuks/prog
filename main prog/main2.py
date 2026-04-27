@@ -6,7 +6,6 @@ Motor Principal de Automação de Coleta e Reanálise de Consórcio V4.
 import os
 import time
 import shutil
-import json
 import requests
 import pandas as pd
 from selenium import webdriver
@@ -154,7 +153,7 @@ def loop_servico():
     # --- CONFIGURAÇÃO DO MODO FANTASMA (SELENIUM TRADICIONAL) ---
     chrome_options = Options()
     # No servidor poderá usar "--headless=new", mas localmente deixe visível para ver acontecer
-    # chrome_options.add_argument("--headless=new") 
+    chrome_options.add_argument("--headless=new") 
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--window-size=1920,1080")
