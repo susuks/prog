@@ -1,18 +1,13 @@
 """
-Motor Principal de Automação de Coleta e Reanálise de Consórcio V3.
-
-Este script gerencia o ciclo de vida dos contratos: desde a captura inicial
-no WhatsApp (via arquivo de fila) até o monitoramento contínuo de pagamentos.
-Ele orquestra a navegação no portal da Tradição e o registro sincronizado
-em múltiplas planilhas do Google Sheets (Individual do Vendedor e Geral).
+Motor Principal de Automação de Coleta e Reanálise de Consórcio V4.
+(Versão API Direta CapSolver - Sem Extensões, 100% via Backend)
 """
 
 import os
 import time
 import shutil
 import json
-import urllib.request
-import zipfile
+import requests
 import pandas as pd
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -35,7 +30,7 @@ from coletor_utils import (
 )
 
 def carregar_chave_capsolver() -> str:
-    """Extrai a chave de API do CapSolver do config.txt."""
+    """Extrai a chave de API do CapSolver a partir do ficheiro config.txt."""
     if os.path.exists("config.txt"):
         with open("config.txt", "r", encoding="utf-8") as f:
             for linha in f:
@@ -43,130 +38,127 @@ def carregar_chave_capsolver() -> str:
                     return linha.split("=", 1)[1].strip()
     return ""
 
-def preparar_capsolver(api_key: str) -> str:
-    """Baixa e configura a extensão oficial do CapSolver com a sua chave."""
-    ext_dir = os.path.join(os.getcwd(), "capsolver_ext")
-    zip_path = os.path.join(os.getcwd(), "capsolver.zip")
+def resolver_captcha_api_direta(api_key: str, site_url: str, site_key: str):
+    """Conversa diretamente com o servidor da IA para obter o Token de Liberação."""
+    print("   -> [IA] A enviar o enigma para a CapSolver...")
+    
+    # 1. Cria a tarefa de resolução (Especificamente para reCAPTCHA V2)
+    payload = {
+        "clientKey": api_key,
+        "task": {
+            "type": "ReCaptchaV2TaskProxyLess",
+            "websiteURL": site_url,
+            "websiteKey": site_key
+        }
+    }
+    
+    try:
+        # Envia a requisição de criação de tarefa
+        res = requests.post("https://api.capsolver.com/createTask", json=payload).json()
+        if res.get("errorId", 0) > 0:
+            print(f"   -> [ERRO IA] A CapSolver recusou: {res.get('errorDescription')}")
+            return None
+            
+        task_id = res.get("taskId")
+        print(f"   -> [IA] Tarefa aceite! (ID: {task_id}). A aguardar resposta...")
 
-    if not os.path.exists(ext_dir):
-        print("\n[SISTEMA] Instalando a Extensão de IA do CapSolver...")
-        url = "https://github.com/capsolver/capsolver-browser-extension/releases/latest/download/capsolver-chrome-extension.zip"
-        try:
-            urllib.request.urlretrieve(url, zip_path)
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(ext_dir)
-            os.remove(zip_path)
-            print("[SISTEMA] Download concluído com sucesso!")
-        except Exception as e: # pylint: disable=broad-exception-caught
-            print(f"[ERRO FATAL] Falha ao baixar CapSolver: {e}")
-            return ""
-
-    # Injeta a chave de API dentro das configurações da extensão
-    config_file = os.path.join(ext_dir, "assets", "config.json")
-    if os.path.exists(config_file):
-        with open(config_file, "r", encoding="utf-8") as f:
-            config = json.load(f)
-
-        config["apiKey"] = api_key
-        config["enabledForCloudflare"] = True
-        config["enabledForRecaptchaV2"] = True
-
-        with open(config_file, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2)
-
-    return ext_dir
-
+        # 2. Pergunta a cada 3 segundos se a IA já terminou de resolver
+        while True:
+            time.sleep(3)
+            res_status = requests.post("https://api.capsolver.com/getTaskResult", json={
+                "clientKey": api_key,
+                "taskId": task_id
+            }).json()
+            
+            status = res_status.get("status")
+            if status == "ready":
+                print("   -> [SUCESSO IA] Token gerado! Enigma resolvido.")
+                return res_status.get("solution").get("gRecaptchaResponse")
+            elif status == "failed":
+                print("   -> [ERRO IA] A inteligência falhou a resolver o desafio.")
+                return None
+                
+    except Exception as e:
+        print(f"   -> [ERRO API] Falha na comunicação HTTP com a CapSolver: {e}")
+        return None
 
 def fazer_login_com_ia(driver):
-    """
-    Loop de execução infinita para processamento de filas e reanálise.
-    O loop é dividido em três fases principais:
-    1. Processamento de Novos Contratos.
-    2. Reanálise Contínua.
-    3. Manutenção (Keep-Alive).
-    """
-    print("\n[PORTARIA] Acessando a página de login da Tradição...")
-    driver.get("https://intranet.consorciotradicao.com.br/autocred/")
+    """Fluxo de login puro: insere credenciais, pede Token à IA e injeta na página."""
+    print("\n[PORTARIA] A aceder à página de login da Tradição...")
+    url_site = "https://intranet.consorciotradicao.com.br/autocred/"
+    driver.get(url_site)
 
     try:
-        # Tratamento do frame da Tradição (Evita erros de não achar o campo)
+        # Tratamento de frame da Tradição
         try:
-            WebDriverWait(driver, 5).until(
-                EC.frame_to_be_available_and_switch_to_it((By.NAME, "mainFrame"))
-            )
+            WebDriverWait(driver, 5).until(EC.frame_to_be_available_and_switch_to_it((By.NAME, "mainFrame")))
             driver.switch_to.default_content()
-        except Exception: pass # pylint: disable=broad-exception-caught
+        except: pass
 
-        # Espera o Cloudflare deixar passar até chegar na tela de usuário
-        campo_user = WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located((By.ID, "j_username"))
-        )
-
+        # 1. Preenche Login e Senha
+        campo_user = WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.ID, "j_username")))
         campo_user.clear()
         campo_user.send_keys(USUARIO_LOGIN)
-
+        
         campo_senha = driver.find_element(By.ID, "j_password")
         campo_senha.clear()
         campo_senha.send_keys(SENHA_LOGIN)
+        print("   -> Credenciais inseridas. A localizar a fechadura do Captcha...")
 
-        print("   -> Credenciais inseridas. Aguardando a IA devorar o Captcha...")
-
-        # Aguarda a Extensão preencher o token secreto do Google ou Cloudflare (timeout de 2 min)
+        # 2. Localiza a "Identidade" (SiteKey) do Captcha diretamente na página
         try:
-            WebDriverWait(driver, 120).until(
-                lambda d: (
-                    (d.find_elements(By.ID, "g-recaptcha-response") and d.find_element(By.ID, "g-recaptcha-response").get_attribute("value") != "") or
-                    (d.find_elements(By.NAME, "cf-turnstile-response") and d.find_element(By.NAME, "cf-turnstile-response").get_attribute("value") != "")
-                )
-            )
-            print("   -> [SUCESSO IA] O enigma foi resolvido! Processando entrada...")
-        except Exception: # pylint: disable=broad-exception-caught
-            print("   -> [AVISO] Timeout aguardando a resposta da IA ou Captcha invisível.")
+            elemento_captcha = driver.find_element(By.CLASS_NAME, "g-recaptcha")
+            site_key = elemento_captcha.get_attribute("data-sitekey")
+        except:
+            print("   -> [AVISO] Captcha não encontrado. A tentar logar direto...")
+            site_key = None
 
-        time.sleep(2)
-        campo_senha.send_keys(Keys.ENTER) # Aperta enter para enviar o formulário
-        time.sleep(6) # Tempo de tolerância para a página interna carregar
+        # 3. Chama a API Direta e injeta o resultado
+        if site_key:
+            chave_api = carregar_chave_capsolver()
+            token_liberacao = resolver_captcha_api_direta(chave_api, url_site, site_key)
+            
+            if token_liberacao:
+                # 4. Injeta o Token no código-fonte da página através de JavaScript
+                script_injecao = f"document.getElementById('g-recaptcha-response').innerHTML = '{token_liberacao}';"
+                driver.execute_script(script_injecao)
+                print("   -> Token injetado no HTML da página com sucesso!")
+            else:
+                print("   -> [FALHA] Sem token válido para prosseguir.")
+                return False
 
-        # Verificação definitiva de Sucesso
+        # 5. Clica no botão de enviar (Pressionar Enter na senha)
+        time.sleep(1)
+        driver.find_element(By.ID, "j_password").send_keys(Keys.ENTER)
+        time.sleep(6) # Tempo para o servidor da Autocred processar o login
+
+        # Verificação de segurança: checar se mudámos de página
         driver.switch_to.default_content()
-        try:
-            # Procura por um menu que só existe na área logada
-            driver.find_element(By.NAME, "LeftFrame")
+        if "login" not in driver.current_url.lower():
             return True
-        except Exception: # pylint: disable=broad-exception-caught
-            # Segunda checagem pela URL
-            if "login" not in driver.current_url.lower():
-                return True
-            return False
-
-    except Exception as e: # pylint: disable=broad-exception-caught
-        print(f"   -> [ERRO PORTARIA] Sequência de login falhou: {e}")
         return False
 
+    except Exception as e:
+        print(f"   -> [ERRO PORTARIA] Sequência de login falhou criticamente: {e}")
+        return False
 
 def loop_servico():
-    """Loop de execução contínua com IA Integrada."""
-    print("\n>>> INICIANDO SISTEMA AUTÔNOMO V3 (Selenium + CapSolver IA) <<<")
+    """Loop de execução contínua com API CapSolver Integrada."""
+    print("\n>>> INICIANDO SISTEMA AUTÓNOMO V4 (Selenium + API CapSolver) <<<")
 
     chave_api = carregar_chave_capsolver()
     if not chave_api:
-        print("[CRÍTICO] A linha 'CAPSOLVER_KEY=' não foi encontrada no 'config.txt'.")
+        print("[CRÍTICO] A linha 'CAPSOLVER_KEY=' não foi encontrada no ficheiro 'config.txt'.")
         return
-
-    # Baixa e configura o Cérebro do CapSolver
-    caminho_extensao = preparar_capsolver(chave_api)
 
     # --- CONFIGURAÇÃO DO MODO FANTASMA (SELENIUM TRADICIONAL) ---
     chrome_options = Options()
-    #chrome_options.add_argument("--headless=new") # Suporta extensões perfeitamente
+    # No servidor poderá usar "--headless=new", mas localmente deixe visível para ver acontecer
+    # chrome_options.add_argument("--headless=new") 
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--window-size=1920,1080")
-
-    if caminho_extensao:
-        chrome_options.add_argument(f"--load-extension={caminho_extensao}")
-
-    # Máscara do Windows para manter a pontuação de confiança alta
+    
     mascara = "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     chrome_options.add_argument(mascara)
 
@@ -182,15 +174,15 @@ def loop_servico():
     while True:
         try:
             # =============================================================
-            # PORTARIA: LOGIN AUTÔNOMO COM IA
+            # PORTARIA: LOGIN AUTÓNOMO COM API
             # =============================================================
             if not autenticado:
                 if fazer_login_com_ia(driver):
-                    print("[LIBERADO] Estamos dentro! O Robô assumiu o controle.")
+                    print("[LIBERADO] Estamos dentro! O Robô assumiu o controlo.")
                     autenticado = True
                     ultimo_keep_alive = time.time()
                 else:
-                    print("[BARRADO] O login falhou. Tentando novamente em 60 segundos...")
+                    print("[BARRADO] O login falhou. A tentar novamente em 60 segundos...")
                     time.sleep(60)
                     continue
 
@@ -208,7 +200,7 @@ def loop_servico():
                 try:
                     df = pd.read_csv(ARQUIVO_EM_PROCESSAMENTO, sep=',', dtype=str)
                     df.columns = [c.strip() for c in df.columns]
-                except Exception: # pylint: disable=broad-exception-caught
+                except Exception:
                     if os.path.exists(ARQUIVO_EM_PROCESSAMENTO):
                         os.remove(ARQUIVO_EM_PROCESSAMENTO)
                     continue
@@ -222,7 +214,7 @@ def loop_servico():
                     if pd.isna(contrato) or not contrato or contrato == 'nan':
                         continue
 
-                    print(f"\n[NOVO] Processando Contrato: {contrato} (Vendedor: {vendedor})...")
+                    print(f"\n[NOVO] A processar Contrato: {contrato} (Vendedor: {vendedor})...")
 
                     nome_planilha_vendedor = f"{PREFIXO_PLANILHA}{vendedor}"
                     nome_planilha_geral = f"{PREFIXO_PLANILHA}GERAL"
@@ -239,19 +231,19 @@ def loop_servico():
                             try:
                                 atualizar_planilha_vendedor(sheet_vend, row.to_dict(), dados, contrato)
                                 anotou_vend = True
-                            except Exception as e: # pylint: disable=broad-exception-caught
-                                print(f"   [ERRO API] Falha na planilha do vendedor: {e}")
+                            except Exception as e: 
+                                print(f"   [ERRO API] Falha na folha do vendedor: {e}")
 
                         if sheet_geral:
                             try:
                                 atualizar_planilha_geral(sheet_geral, row.to_dict(), dados, contrato)
                                 anotou_geral = True
-                            except Exception as e: # pylint: disable=broad-exception-caught
-                                print(f"   [ERRO API] Falha na planilha GERAL: {e}")
+                            except Exception as e: 
+                                print(f"   [ERRO API] Falha na folha GERAL: {e}")
 
                         if anotou_vend or anotou_geral:
                             destino_log = f"{nome_planilha_vendedor} + GERAL" if (anotou_vend and anotou_geral) else (nome_planilha_vendedor if anotou_vend else f"{PREFIXO_PLANILHA}GERAL")
-                            print(f"   [OK] Registrado com sucesso em: {destino_log}")
+                            print(f"   [OK] Registado com sucesso em: {destino_log}")
 
                             texto_status = "1º Parcela Paga" if dados['pago'] else "1º Parcela Não Paga"
                             salvar_historico_concluido(contrato, destino_log, vendedor, telefone_vendedor, texto_status)
@@ -259,7 +251,7 @@ def loop_servico():
                             if not dados['pago']:
                                 adicionar_para_reanalise(contrato, vendedor, telefone_vendedor, nome_planilha_vendedor, origem, row.to_dict())
                         else:
-                            print("   [CRÍTICO] Falha ao atualizar. Devolvendo contrato para a fila...")
+                            print("   [CRÍTICO] Falha ao atualizar. A devolver contrato para a fila...")
                             if not os.path.exists(ARQUIVO_FILA):
                                 with open(ARQUIVO_FILA, 'w', encoding='utf-8') as f_fila:
                                     f_fila.write("contrato,origem,vendedor,lance livre,telefone\n")
@@ -285,11 +277,11 @@ def loop_servico():
                 info['tentativas'] = info.get('tentativas', 0) + 1
                 mudou_pendentes = True
 
-                print(f"\n[REANÁLISE] Verificando {contrato} (Tentativa {info['tentativas']}/{MAX_TENTATIVAS})...")
+                print(f"\n[REANÁLISE] A verificar {contrato} (Tentativa {info['tentativas']}/{MAX_TENTATIVAS})...")
 
                 if buscar_contrato(driver, contrato):
                     if verificar_apenas_pagamento(driver):
-                        print("   [PAGAMENTO DETECTADO] Atualizando status nas planilhas...")
+                        print("   [PAGAMENTO DETETADO] A atualizar o status nas planilhas...")
                         anotou_vend, anotou_geral = False, False
 
                         sheet_v = conectar_google_sheets(info['nome_planilha'], NOME_ABA)
@@ -297,16 +289,14 @@ def loop_servico():
                             linha_v = encontrar_linha_do_contrato(sheet_v, contrato, col_idx=13)
                             if linha_v:
                                 try: sheet_v.update_cell(linha_v, 2, "1º Parcela Paga"); anotou_vend = True
-                                except Exception: # pylint: disable=broad-exception-caught
-                                    pass
+                                except Exception: pass
 
                         sheet_g = conectar_google_sheets(f"{PREFIXO_PLANILHA}GERAL", NOME_ABA_GERAL)
                         if sheet_g:
                             linha_g = encontrar_linha_do_contrato(sheet_g, contrato, col_idx=12)
                             if linha_g:
                                 try: sheet_g.update_cell(linha_g, 1, "1º Parcela Paga"); anotou_geral = True
-                                except Exception: # pylint: disable=broad-exception-caught
-                                    pass
+                                except Exception: pass
 
                         if anotou_vend or anotou_geral:
                             destino_log = f"{info['nome_planilha']} + GERAL" if (anotou_vend and anotou_geral) else (info['nome_planilha'] if anotou_vend else f"{PREFIXO_PLANILHA}GERAL")
@@ -328,13 +318,13 @@ def loop_servico():
             # =============================================================
             if (time.time() - ultimo_keep_alive) > TEMPO_INATIVIDADE_MAXIMO:
                 if not manter_sessao_viva(driver):
-                    print("[AVISO] Sessão expirada ou perdida. Forçando Relogin da IA...")
-                    autenticado = False
+                    print("[AVISO] Sessão expirada ou perdida. A forçar Relogin da IA...")
+                    autenticado = False 
                 ultimo_keep_alive = time.time()
 
             time.sleep(1)
 
-        except Exception as e: # pylint: disable=broad-exception-caught
+        except Exception as e:
             print(f"[ERRO GERAL NO LOOP] A execução foi protegida. Detalhe: {e}")
             time.sleep(2)
 
