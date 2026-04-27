@@ -158,7 +158,7 @@ def loop_servico():
 
     # --- CONFIGURAÇÃO DO MODO FANTASMA (SELENIUM TRADICIONAL) ---
     chrome_options = Options()
-    chrome_options.add_argument("--headless=new") # Suporta extensões perfeitamente
+    #chrome_options.add_argument("--headless=new") # Suporta extensões perfeitamente
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--window-size=1920,1080")
