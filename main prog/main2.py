@@ -9,6 +9,7 @@ import shutil
 import json
 import pandas as pd
 from selenium.webdriver.common.by import By
+from pyvirtualdisplay import Display
 import undetected_chromedriver as uc
 
 # Importação explícita do módulo de utilitários local
@@ -71,13 +72,19 @@ def loop_servico():
     """
     print("\n>>> INICIANDO SISTEMA CENTRALIZADO V2 (Modo Stealth UC) <<<")
 
-    # --- CONFIGURAÇÃO DO MODO STEALTH (UNDETECTED) ---
+# --- LIGA O MONITOR FANTASMA ANTES DO CHROME ---
+    print("[SISTEMA] Ligando Monitor Virtual 1920x1080...")
+    display = Display(visible=0, size=(1920, 1080))
+    display.start()
+    # -----------------------------------------------
+
+    # --- CONFIGURAÇÃO DO MODO STEALTH ---
     options = uc.ChromeOptions()
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--window-size=1920,1080")
+    # ATENÇÃO: NUNCA USE HEADLESS AQUI. O MONITOR VIRTUAL JÁ ESCONDE A TELA.
 
-    driver = uc.Chrome(options=options, version_main=147, headless=True)
+    driver = uc.Chrome(options=options, version_main=147)
     # ------------------------------------------------
 
     autenticado = False
