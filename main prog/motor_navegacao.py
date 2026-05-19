@@ -1,39 +1,72 @@
 """
 Módulo Motor de Navegação e Extração (Web Scraping).
 
-Responsável por centralizar toda a interação com o navegador, manipulação do
-Document Object Model (DOM), resolução de Captchas via IA (CapSolver) e
-manutenção da sessão no portal da Autocred.
+Responsável por inicializar o navegador, interagir com o Document Object
+Model (DOM), resolver Captchas via IA (CapSolver) e extrair dados da Autocred.
 """
 
 import os
 import time
 import requests
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
 
 # Importa as credenciais e os formatadores do Módulo de Dados
-from gerador_dados import USUARIO_LOGIN, SENHA_LOGIN, limpar_inteiro, limpar_valor
+from gerador_dados import (
+    USUARIO_LOGIN,
+    SENHA_LOGIN,
+    MODO_DESKTOP,
+    limpar_inteiro,
+    limpar_valor
+)
 
 # Constante de controle de velocidade do robô
-PAUSA_HUMANA = 0.4  # Segundos de espera após cada clique para evitar bloqueios
+PAUSA_HUMANA = 0.4
+
+
+# ============================================================================
+# INICIALIZAÇÃO DO NAVEGADOR
+# ============================================================================
+def iniciar_navegador() -> webdriver.Chrome:
+    """
+    Configura e inicializa a instância do Chrome WebDriver.
+    Aplica o modo fantasma (headless) baseando-se na configuração MODO_DESKTOP.
+    """
+    chrome_options = Options()
+
+    # Só oculta a janela se o MODO_DESKTOP for False no config.txt
+    if not MODO_DESKTOP:
+        chrome_options.add_argument("--headless=new")
+
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--window-size=1920,1080")
+
+    mascara = (
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+    chrome_options.add_argument(mascara)
+
+    driver = webdriver.Chrome(
+        service=Service(ChromeDriverManager().install()),
+        options=chrome_options
+    )
+    return driver
 
 
 # ============================================================================
 # NAVEGAÇÃO E EXTRAÇÃO DE DADOS (SELENIUM)
 # ============================================================================
-def buscar_contrato(driver, contrato: str) -> bool:
+def buscar_contrato(driver: webdriver.Chrome, contrato: str) -> bool:
     """
     Navega pelos menus laterais da intranet e executa a pesquisa pelo contrato.
-
-    Args:
-        driver (WebDriver): Instância ativa do navegador.
-        contrato (str): O contrato numérico a ser localizado.
-
-    Returns:
-        bool: True se acedeu à ficha do consorciado com sucesso, False em erro.
     """
     driver.switch_to.default_content()
     try:
@@ -69,7 +102,10 @@ def buscar_contrato(driver, contrato: str) -> bool:
         btn_localizar.click()
         time.sleep(PAUSA_HUMANA)
 
-        xpath_resultado = f"//td/div[contains(text(), '{contrato}')] | //td[contains(@class, 'hand')]/div"
+        xpath_resultado = (
+            f"//td/div[contains(text(), '{contrato}')] | "
+            "//td[contains(@class, 'hand')]/div"
+        )
         resultado = WebDriverWait(driver, 10).until(
             EC.element_to_be_clickable((By.XPATH, xpath_resultado))
         )
@@ -94,15 +130,9 @@ def buscar_contrato(driver, contrato: str) -> bool:
         return False
 
 
-def verificar_apenas_pagamento(driver) -> bool:
+def verificar_apenas_pagamento(driver: webdriver.Chrome) -> bool:
     """
     Lê a informação de parcelas pagas no ecrã principal da cota.
-
-    Args:
-        driver (WebDriver): Navegador estacionado na tela de dados do contrato.
-
-    Returns:
-        bool: True se o número de parcelas pagas for maior que zero.
     """
     try:
         xpath_pagas = "//td[contains(text(), 'Parcelas Pagas:')]/following-sibling::td"
@@ -113,24 +143,13 @@ def verificar_apenas_pagamento(driver) -> bool:
         return False
 
 
-def extrair_dados_completos(driver) -> dict:
+def extrair_dados_completos(driver: webdriver.Chrome) -> dict:
     """
     Raspa todas as informações cadastrais e financeiras do cliente.
-
-    Args:
-        driver (WebDriver): Navegador no ecrã inicial da Cota.
-
-    Returns:
-        dict: Dicionário completo com chaves de identificação e valores.
     """
     dados = {
-        "credito": 0.00,
-        "nome": "-",
-        "telefone": "-",
-        "data_venda": "",
-        "grupo": "-",
-        "cota": "-",
-        "pago": False,
+        "credito": 0.00, "nome": "-", "telefone": "-",
+        "data_venda": "", "grupo": "-", "cota": "-", "pago": False
     }
 
     try:
@@ -186,8 +205,10 @@ def extrair_dados_completos(driver) -> dict:
     return dados
 
 
-def manter_sessao_viva(driver) -> bool:
-    """Realiza um clique silencioso no menu para evitar timeout do servidor."""
+def manter_sessao_viva(driver: webdriver.Chrome) -> bool:
+    """
+    Realiza um clique silencioso no menu para evitar timeout do servidor.
+    """
     try:
         driver.switch_to.default_content()
         WebDriverWait(driver, 5).until(
@@ -207,7 +228,9 @@ def manter_sessao_viva(driver) -> bool:
 # INTELIGÊNCIA ARTIFICIAL E AUTENTICAÇÃO
 # ============================================================================
 def carregar_chave_capsolver() -> str:
-    """Extrai a chave de API do CapSolver a partir do ficheiro config.txt."""
+    """
+    Extrai a chave de API do CapSolver a partir do ficheiro config.txt.
+    """
     if os.path.exists("config.txt"):
         with open("config.txt", "r", encoding="utf-8") as f:
             for linha in f:
@@ -216,25 +239,28 @@ def carregar_chave_capsolver() -> str:
     return ""
 
 
-def resolver_captcha_api_direta(api_key: str, site_url: str, site_key: str):
-    """Conversa diretamente com o servidor da IA para obter o Token de Liberação."""
+def resolver_captcha_api_direta(api_key: str, site_url: str, site_key: str) -> str:
+    """
+    Conversa diretamente com o servidor da IA para obter o Token de Liberação.
+    """
     print("   -> [IA] A enviar o enigma para a CapSolver...")
     payload = {
         "clientKey": api_key,
         "task": {
             "type": "ReCaptchaV2TaskProxyLess",
             "websiteURL": site_url,
-            "websiteKey": site_key,
-        },
+            "websiteKey": site_key
+        }
     }
 
     try:
         res = requests.post(
             "https://api.capsolver.com/createTask", json=payload, timeout=10
         ).json()
+
         if res.get("errorId", 0) > 0:
             print(f"   -> [ERRO IA] A CapSolver recusou: {res.get('errorDescription')}")
-            return None
+            return ""
 
         task_id = res.get("taskId")
         print(f"   -> [IA] Tarefa aceite! (ID: {task_id}). A aguardar resposta...")
@@ -251,17 +277,20 @@ def resolver_captcha_api_direta(api_key: str, site_url: str, site_key: str):
             if status == "ready":
                 print("   -> [SUCESSO IA] Token gerado! Enigma resolvido.")
                 return res_status.get("solution").get("gRecaptchaResponse")
-            elif status == "failed":
+
+            if status == "failed":
                 print("   -> [ERRO IA] A inteligência falhou a resolver o desafio.")
-                return None
+                return ""
 
     except Exception as e:  # pylint: disable=broad-exception-caught
         print(f"   -> [ERRO API] Falha na comunicação HTTP com a CapSolver: {e}")
-        return None
+        return ""
 
 
-def fazer_login_com_ia(driver):
-    """Fluxo de login puro: insere credenciais, pede Token à IA e injeta no DOM."""
+def fazer_login_com_ia(driver: webdriver.Chrome) -> bool:
+    """
+    Fluxo de login puro: insere credenciais, pede Token à IA e injeta no DOM.
+    """
     print("\n[PORTARIA] A aceder à página de login da Tradição...")
     url_site = "https://intranet.consorciotradicao.com.br/autocred/"
     driver.get(url_site)
@@ -298,7 +327,10 @@ def fazer_login_com_ia(driver):
             token_liberacao = resolver_captcha_api_direta(chave_api, url_site, site_key)
 
             if token_liberacao:
-                script_injecao = f"document.getElementById('g-recaptcha-response').innerHTML = '{token_liberacao}';"
+                script_injecao = (
+                    "document.getElementById('g-recaptcha-response').innerHTML = "
+                    f"'{token_liberacao}';"
+                )
                 driver.execute_script(script_injecao)
                 print("   -> Token injetado no HTML da página com sucesso!")
             else:
