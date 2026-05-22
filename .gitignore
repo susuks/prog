@@ -11,15 +11,14 @@ venv/
 session-sessao-media/
 
 # Credenciai, Configurações Pessoais, logs, etc...
-files/*.log
 *.log
+*.json
 files/sticker_id.txt
 files/sticker_pronto.webp
 files/config.txt
 files/vendedores.csv
 files/vendedores enc.csv
 files/historico_concluidos.csv
-files/*.json
 
 
 # Arquivos do sistema
