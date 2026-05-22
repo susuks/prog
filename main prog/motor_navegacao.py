@@ -7,6 +7,7 @@ Model (DOM), resolver Captchas via IA (CapSolver) e extrair dados da Autocred.
 
 import os
 import time
+import logging
 import requests
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -17,16 +18,16 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 
-# Importa as credenciais e os formatadores do Módulo de Dados
 from gerador_dados import (
     USUARIO_LOGIN,
     SENHA_LOGIN,
     MODO_DESKTOP,
     limpar_inteiro,
-    limpar_valor
+    limpar_valor,
 )
 
-# Constante de controle de velocidade do robô
+logger = logging.getLogger("EnterpriseBot")
+
 PAUSA_HUMANA = 0.4
 
 
@@ -40,7 +41,6 @@ def iniciar_navegador() -> webdriver.Chrome:
     """
     chrome_options = Options()
 
-    # Só oculta a janela se o MODO_DESKTOP for False no config.txt
     if not MODO_DESKTOP:
         chrome_options.add_argument("--headless=new")
 
@@ -55,8 +55,7 @@ def iniciar_navegador() -> webdriver.Chrome:
     chrome_options.add_argument(mascara)
 
     driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=chrome_options
+        service=Service(ChromeDriverManager().install()), options=chrome_options
     )
     return driver
 
@@ -132,7 +131,7 @@ def buscar_contrato(driver: webdriver.Chrome, contrato: str) -> bool:
 
 def verificar_apenas_pagamento(driver: webdriver.Chrome) -> bool:
     """
-    Lê a informação de parcelas pagas no ecrã principal da cota.
+    Lê a informação de parcelas pagas na tela principal da cota.
     """
     try:
         xpath_pagas = "//td[contains(text(), 'Parcelas Pagas:')]/following-sibling::td"
@@ -148,8 +147,13 @@ def extrair_dados_completos(driver: webdriver.Chrome) -> dict:
     Raspa todas as informações cadastrais e financeiras do cliente.
     """
     dados = {
-        "credito": 0.00, "nome": "-", "telefone": "-",
-        "data_venda": "", "grupo": "-", "cota": "-", "pago": False
+        "credito": 0.00,
+        "nome": "-",
+        "telefone": "-",
+        "data_venda": "",
+        "grupo": "-",
+        "cota": "-",
+        "pago": False,
     }
 
     try:
@@ -229,7 +233,7 @@ def manter_sessao_viva(driver: webdriver.Chrome) -> bool:
 # ============================================================================
 def carregar_chave_capsolver() -> str:
     """
-    Extrai a chave de API do CapSolver a partir do ficheiro config.txt.
+    Extrai a chave de API do CapSolver a partir do arquivo config.txt.
     """
     if os.path.exists("config.txt"):
         with open("config.txt", "r", encoding="utf-8") as f:
@@ -243,14 +247,14 @@ def resolver_captcha_api_direta(api_key: str, site_url: str, site_key: str) -> s
     """
     Conversa diretamente com o servidor da IA para obter o Token de Liberação.
     """
-    print("   -> [IA] A enviar o enigma para a CapSolver...")
+    logger.info("   -> [IA] Enviando o enigma para a CapSolver...")
     payload = {
         "clientKey": api_key,
         "task": {
             "type": "ReCaptchaV2TaskProxyLess",
             "websiteURL": site_url,
-            "websiteKey": site_key
-        }
+            "websiteKey": site_key,
+        },
     }
 
     try:
@@ -259,11 +263,15 @@ def resolver_captcha_api_direta(api_key: str, site_url: str, site_key: str) -> s
         ).json()
 
         if res.get("errorId", 0) > 0:
-            print(f"   -> [ERRO IA] A CapSolver recusou: {res.get('errorDescription')}")
+            logger.error(
+                "   -> [ERRO IA] A CapSolver recusou: %s", res.get("errorDescription")
+            )
             return ""
 
         task_id = res.get("taskId")
-        print(f"   -> [IA] Tarefa aceite! (ID: {task_id}). A aguardar resposta...")
+        logger.info(
+            "   -> [IA] Tarefa aceita! (ID: %s). Aguardando resposta...", task_id
+        )
 
         while True:
             time.sleep(3)
@@ -275,15 +283,19 @@ def resolver_captcha_api_direta(api_key: str, site_url: str, site_key: str) -> s
 
             status = res_status.get("status")
             if status == "ready":
-                print("   -> [SUCESSO IA] Token gerado! Enigma resolvido.")
+                logger.info("   -> [SUCESSO IA] Token gerado! Enigma resolvido.")
                 return res_status.get("solution").get("gRecaptchaResponse")
 
             if status == "failed":
-                print("   -> [ERRO IA] A inteligência falhou a resolver o desafio.")
+                logger.error(
+                    "   -> [ERRO IA] A inteligência falhou em resolver o desafio."
+                )
                 return ""
 
     except Exception as e:  # pylint: disable=broad-exception-caught
-        print(f"   -> [ERRO API] Falha na comunicação HTTP com a CapSolver: {e}")
+        logger.error(
+            "   -> [ERRO API] Falha na comunicação HTTP com a CapSolver: %s", e
+        )
         return ""
 
 
@@ -291,7 +303,7 @@ def fazer_login_com_ia(driver: webdriver.Chrome) -> bool:
     """
     Fluxo de login puro: insere credenciais, pede Token à IA e injeta no DOM.
     """
-    print("\n[PORTARIA] A aceder à página de login da Tradição...")
+    logger.info("\n[PORTARIA] Acessando a página de login da Tradição...")
     url_site = "https://intranet.consorciotradicao.com.br/autocred/"
     driver.get(url_site)
 
@@ -313,13 +325,17 @@ def fazer_login_com_ia(driver: webdriver.Chrome) -> bool:
         campo_senha = driver.find_element(By.ID, "j_password")
         campo_senha.clear()
         campo_senha.send_keys(SENHA_LOGIN)
-        print("   -> Credenciais inseridas. A localizar a fechadura do Captcha...")
+        logger.info(
+            "   -> Credenciais inseridas. Localizando a fechadura do Captcha..."
+        )
 
         try:
             elemento_captcha = driver.find_element(By.CLASS_NAME, "g-recaptcha")
             site_key = elemento_captcha.get_attribute("data-sitekey")
         except Exception:  # pylint: disable=broad-exception-caught
-            print("   -> [AVISO] Captcha não encontrado. A tentar logar direto...")
+            logger.warning(
+                "   -> [AVISO] Captcha não encontrado. Tentando logar direto..."
+            )
             site_key = None
 
         if site_key:
@@ -332,20 +348,39 @@ def fazer_login_com_ia(driver: webdriver.Chrome) -> bool:
                     f"'{token_liberacao}';"
                 )
                 driver.execute_script(script_injecao)
-                print("   -> Token injetado no HTML da página com sucesso!")
+                logger.info("   -> Token injetado no HTML da página com sucesso!")
             else:
-                print("   -> [FALHA] Sem token válido para prosseguir.")
+                logger.error("   -> [FALHA] Sem token válido para prosseguir.")
                 return False
 
+        # RETORNANDO AO MODELO ANTERIOR (ESTÁVEL)
         time.sleep(1)
-        driver.find_element(By.ID, "j_password").send_keys(Keys.ENTER)
+
+        # --- VERIFICAÇÃO DE INTEGRIDADE DA SENHA ---
+        campo_senha_final = driver.find_element(By.ID, "j_password")
+        if not campo_senha_final.get_attribute("value"):
+            logger.info("   -> [CORREÇÃO] A senha desapareceu do campo. Reinserindo...")
+            campo_senha_final.clear()
+            campo_senha_final.send_keys(SENHA_LOGIN)
+        # -------------------------------------------
+
+        campo_senha_final.send_keys(Keys.ENTER)
         time.sleep(6)
 
         driver.switch_to.default_content()
-        if "login" not in driver.current_url.lower():
-            return True
-        return False
+        url_atual = driver.current_url.lower()
+
+        # MANTÉM APENAS A CORREÇÃO DE FALSO POSITIVO
+        if "index.asp" in url_atual or "login" in url_atual:
+            logger.error(
+                "   -> [BARRADO] O portal recusou o acesso e retornou para a página inicial."
+            )
+            return False
+
+        return True
 
     except Exception as e:  # pylint: disable=broad-exception-caught
-        print(f"   -> [ERRO PORTARIA] Sequência de login falhou criticamente: {e}")
+        logger.error(
+            "   -> [ERRO PORTARIA] Sequência de login falhou criticamente: %s", e
+        )
         return False

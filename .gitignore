@@ -2,28 +2,25 @@
 node_modules/
 __pycache__/
 *.pyc
+venv/
 
 # Sessões e Autenticação (NUNCA SUBIR ISSO)
 .wwebjs_auth/
 .wwebjs_cache/
 .wwebjs_auth_media/
 session-sessao-media/
-back/
-varios/
-venv/
 
 # Credenciais e Configurações Pessoais
 credentials.json
+cache_planilhas.json
+mapeamento_lids.json
+pendentes_reanalise.json
 config.txt
 sticker_id.txt
 sticker_pronto.webp
 historico_concluidos.csv
-back.rar
-pendentes_reanalise.json
 vendedores.csv
 vendedores enc.csv
-codigos.txt
-fila_vendas.csv
 
 # Arquivos temporários e de log
 *.log
