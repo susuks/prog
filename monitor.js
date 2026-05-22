@@ -7,8 +7,8 @@ const winston = require('winston');
 
 // --- CONFIGURAÇÕES ENTERPRISE ---
 const NOME_GRUPO_ALVO = 'VENDAS'; 
-const ARQUIVO_VENDEDORES = 'vendedores.csv';
-const ARQUIVO_LIDS = 'mapeamento_lids.json';
+const ARQUIVO_VENDEDORES = 'files/vendedores.csv';
+const ARQUIVO_LIDS = 'files/mapeamento_lids.json';
 const URL_API_PYTHON = 'http://127.0.0.1:5000/processar_venda';
 const TOKEN_API = 'CHAVE_SECRETA_ENTERPRISE_V6'; // Segurança interna
 
@@ -37,8 +37,8 @@ const logger = winston.createLogger({
     ),
     transports: [
         new winston.transports.Console(),
-        new winston.transports.File({ filename: 'nodejs_error.log', level: 'error' }),
-        new winston.transports.File({ filename: 'nodejs_sistema.log' })
+        new winston.transports.File({ filename: 'files/nodejs_error.log', level: 'error' }),
+        new winston.transports.File({ filename: 'files/nodejs_sistema.log' })
     ]
 });
 

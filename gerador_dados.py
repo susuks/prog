@@ -19,12 +19,12 @@ logger = logging.getLogger("EnterpriseBot")
 # ============================================================================
 # CONSTANTES E CAMINHOS DE ARQUIVOS
 # ============================================================================
-ARQUIVO_FILA = "fila_vendas.csv"
-ARQUIVO_EM_PROCESSAMENTO = "temp_processando.csv"
-ARQUIVO_HISTORICO_SUCESSO = "historico_concluidos.csv"
-ARQUIVO_PENDENTES = "pendentes_reanalise.json"
-ARQUIVO_CACHE_PLANILHAS = "cache_planilhas.json"
-ARQUIVO_CONFIG = "config.txt"
+ARQUIVO_FILA = "files/fila_vendas.csv"
+ARQUIVO_EM_PROCESSAMENTO = "files/temp_processando.csv"
+ARQUIVO_HISTORICO_SUCESSO = "files/historico_concluidos.csv"
+ARQUIVO_PENDENTES = "files/pendentes_reanalise.json"
+ARQUIVO_CACHE_PLANILHAS = "files/cache_planilhas.json"
+ARQUIVO_CONFIG = "files/config.txt"
 MAX_TENTATIVAS = 10000
 TEMPO_INATIVIDADE_MAXIMO = 300
 
@@ -245,7 +245,7 @@ def conectar_google_sheets(nome_planilha: str, aba: str):
     ]
     try:
         creds = ServiceAccountCredentials.from_json_keyfile_name(
-            "credentials.json", scope
+            "files/credentials.json", scope
         )
         cliente = gspread.authorize(creds)
     except Exception as e:  # pylint: disable=broad-exception-caught

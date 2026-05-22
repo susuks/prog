@@ -45,7 +45,7 @@ from motor_navegacao import (
 logger = logging.getLogger("EnterpriseBot")
 logger.setLevel(logging.INFO)
 log_handler = RotatingFileHandler(
-    "python_sistema.log", maxBytes=5 * 1024 * 1024, backupCount=3
+    "files/python_sistema.log", maxBytes=5 * 1024 * 1024, backupCount=3
 )
 log_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 log_handler.setFormatter(log_formatter)

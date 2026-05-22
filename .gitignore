@@ -1,32 +1,25 @@
-# Dependências gigantes (não salvar, instalamos com npm install)
+# Dependências gigantes
 node_modules/
 __pycache__/
 *.pyc
 venv/
 
-# Sessões e Autenticação (NUNCA SUBIR ISSO)
+# Sessões e Autenticação
 .wwebjs_auth/
 .wwebjs_cache/
 .wwebjs_auth_media/
 session-sessao-media/
 
-# Credenciais e Configurações Pessoais
-credentials.json
-cache_planilhas.json
-mapeamento_lids.json
-pendentes_reanalise.json
-config.txt
-sticker_id.txt
-sticker_pronto.webp
-historico_concluidos.csv
-vendedores.csv
-vendedores enc.csv
+# Credenciai, Configurações Pessoais, logs, etc...
+files/*.log
+files/sticker_id.txt
+files/sticker_pronto.webp
+files/config.txt
+files/vendedores.csv
+files/vendedores enc.csv
+files/historico_concluidos.csv
+files/*.json
 
-# Arquivos temporários e de log
-*.log
-temp_processando.csv
-erro_site.png
-cookies.json
 
 # Arquivos do sistema
 .DS_Store

@@ -235,8 +235,8 @@ def carregar_chave_capsolver() -> str:
     """
     Extrai a chave de API do CapSolver a partir do arquivo config.txt.
     """
-    if os.path.exists("config.txt"):
-        with open("config.txt", "r", encoding="utf-8") as f:
+    if os.path.exists("files/config.txt"):
+        with open("files/config.txt", "r", encoding="utf-8") as f:
             for linha in f:
                 if linha.startswith("CAPSOLVER_KEY="):
                     return linha.split("=", 1)[1].strip()
