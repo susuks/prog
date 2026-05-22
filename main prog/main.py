@@ -7,6 +7,7 @@ o controle de concorrência com o Selenium.
 
 import time
 import threading
+from waitress import serve
 import logging
 from logging.handlers import RotatingFileHandler
 from flask import Flask, request, jsonify
@@ -339,4 +340,6 @@ if __name__ == "__main__":
     thread_background = threading.Thread(target=loop_reanalise_background, daemon=True)
     thread_background.start()
 
-    app.run(host="0.0.0.0", port=5000, use_reloader=False)
+
+    logger.info("Servidor WSGI de produção (Waitress) iniciado na porta 5000.")
+    serve(app, host='0.0.0.0', port=5000)
