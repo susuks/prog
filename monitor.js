@@ -5,15 +5,13 @@ const csv = require('csv-parser');
 const axios = require('axios');
 const winston = require('winston');
 
-// --- CONFIGURAÇÕES ENTERPRISE ---
 const NOME_GRUPO_ALVO = 'VENDAS'; 
 const ARQUIVO_VENDEDORES = 'files/vendedores.csv';
 const ARQUIVO_LIDS = 'files/mapeamento_lids.json';
 const URL_API_PYTHON = 'http://127.0.0.1:5000/processar_venda';
-const TOKEN_API = 'CHAVE_SECRETA_ENTERPRISE_V6'; // Segurança interna
+const TOKEN_API = 'CHAVE_SECRETA_ENTERPRISE_V6'; 
 
-// SUBSTITUA PELO SEU NÚMERO (Ex: 556799999999@c.us)
-const NUMERO_ADMIN = '556799999999@c.us'; 
+const NUMERO_ADMIN = '556781494851@c.us'; 
 
 const MAPA_ORIGENS = {
     "1": "DuoTalk", "2": "Tráfego", "3": "Remarketing", "4": "Contato Lucas",
@@ -24,11 +22,10 @@ const MAPA_ORIGENS = {
 
 let mapaVendedores = {};
 let mapaLids = {};
-let pendentesAprovacao = {}; // Fila de aprovação de 10 min
-let filaRetentativas = [];   // Fila de resiliência
+let pendentesAprovacao = {}; 
+let filaRetentativas = [];   
 let sistemaIniciado = false;
 
-// --- CONFIGURAÇÃO DE LOGGING (WINSTON) ---
 const logger = winston.createLogger({
     level: 'info',
     format: winston.format.combine(
@@ -51,7 +48,6 @@ const client = new Client({
     }
 });
 
-// --- FUNÇÕES DE MEMÓRIA E NORMALIZAÇÃO ---
 function normalizarId(idBruto) {
     if (!idBruto) return '';
     return idBruto.replace(/:.*?@/, '@');
@@ -96,7 +92,6 @@ function extrairDados(texto) {
     return null;
 }
 
-// --- FILA DE RETENTATIVAS (RESILIÊNCIA) ---
 setInterval(async () => {
     if (filaRetentativas.length > 0) {
         const item = filaRetentativas.shift();
@@ -109,21 +104,20 @@ setInterval(async () => {
             });
             const status = resposta.data.status_pagamento;
             const planilha = resposta.data.planilha;
-            item.loadingMsg.edit(`[REGISTRADO] Contrato validado com sucesso (após retentativa).\\n\\nContrato: ${item.dadosVenda.contrato}\\nVendedor: ${item.dadosVenda.vendedor}\\nPlanilha: ${planilha}\\nStatus: ${status}`);
+            item.loadingMsg.edit(`[REGISTRADO] Contrato validado com sucesso (após retentativa).\n\nContrato: ${item.dadosVenda.contrato}\nVendedor: ${item.dadosVenda.vendedor}\nPlanilha: ${planilha}\nStatus: ${status}`);
         } catch (erroApi) {
             item.tentativas += 1;
             if (item.tentativas < 3) {
                 filaRetentativas.push(item);
                 logger.warn(`Falha na retentativa ${item.dadosVenda.contrato}. Devolvido para a fila.`);
             } else {
-                item.loadingMsg.edit(`[ERRO] Falha definitiva ao processar contrato após múltiplas tentativas.\\n\\nContrato: ${item.dadosVenda.contrato}`);
+                item.loadingMsg.edit(`[ERRO] Falha definitiva ao processar contrato após múltiplas tentativas.\n\nContrato: ${item.dadosVenda.contrato}`);
                 logger.error(`Abandono de retentativa para o contrato ${item.dadosVenda.contrato}.`);
             }
         }
     }
-}, 30000); // Processa a fila a cada 30 segundos
+}, 30000); 
 
-// --- NÚCLEO DE PROCESSAMENTO ---
 async function processarMensagem(msg) {
     try {
         if (msg.from === 'status@broadcast') return;
@@ -134,9 +128,11 @@ async function processarMensagem(msg) {
         const chat = await msg.getChat();
         const isGrupoAlvo = chat.isGroup && chat.name && chat.name.toUpperCase() === NOME_GRUPO_ALVO.toUpperCase();
         const isPrivado = !chat.isGroup;
-
         // 1. FLUXO DE APROVAÇÃO ADMINISTRATIVA (Comando #ap#NUMERO#)
-        if (idRemetente === NUMERO_ADMIN && corpoMsg.startsWith('#ap#') && corpoMsg.endsWith('#')) {
+        const numeroAdminLimpo = NUMERO_ADMIN.replace(/\D/g, '');
+        const idRemetenteLimpo = idRemetente.replace(/\D/g, '');
+
+        if (idRemetenteLimpo === numeroAdminLimpo && corpoMsg.startsWith('#ap#') && corpoMsg.endsWith('#')) {
             const numAprovado = corpoMsg.replace(/\D/g, '');
             if (pendentesAprovacao[numAprovado]) {
                 const idVendedor = pendentesAprovacao[numAprovado].idRemetente;
@@ -154,7 +150,6 @@ async function processarMensagem(msg) {
             return;
         }
 
-        // 2. FLUXO DE SOLICITAÇÃO DE CADASTRO (#NUMERO#)
         const matchCadastro = corpoMsg.match(/^#(\d+)#$/);
         if (matchCadastro) {
             const numeroFornecido = matchCadastro[1];
@@ -171,10 +166,9 @@ async function processarMensagem(msg) {
                 pendentesAprovacao[numeroFornecido] = { idRemetente: idRemetente };
                 
                 msg.reply(`[AGUARDANDO] Identidade reconhecida (${nomeEncontrado}). Solicitação enviada à administração. Aguarde aprovação.`);
-                client.sendMessage(NUMERO_ADMIN, `[SOLICITAÇÃO DE ACESSO]\\nVendedor: ${nomeEncontrado}\\nNúmero: ${numeroFornecido}\\n\\nResponda com o comando exato abaixo para aprovar:\\n#ap#${numeroFornecido}#`);
+                client.sendMessage(NUMERO_ADMIN, `[SOLICITAÇÃO DE ACESSO]\nVendedor: ${nomeEncontrado}\nNúmero: ${numeroFornecido}\n\nResponda com o comando exato abaixo para aprovar:\n#ap#${numeroFornecido}#`);
                 logger.info(`Nova solicitação de acesso de ${nomeEncontrado} (${numeroFornecido}).`);
 
-                // Timeout de 10 minutos
                 setTimeout(() => {
                     if (pendentesAprovacao[numeroFornecido]) {
                         delete pendentesAprovacao[numeroFornecido];
@@ -189,7 +183,6 @@ async function processarMensagem(msg) {
             return;
         }
 
-        // 3. FLUXO DE VENDA (API REST)
         if (isGrupoAlvo || isPrivado) {
             const dadosVenda = extrairDados(corpoMsg);
             
@@ -219,7 +212,7 @@ async function processarMensagem(msg) {
                         const status = respostaPython.data.status_pagamento;
                         const planilha = respostaPython.data.planilha;
                         
-                        loadingMsg.edit(`[REGISTRADO] Contrato validado com sucesso.\\n\\nContrato: ${dadosVenda.contrato}\\nVendedor: ${nomeVendedor}\\nPlanilha: ${planilha}\\nStatus: ${status}`);
+                        loadingMsg.edit(`[REGISTRADO] Contrato validado com sucesso.\n\nContrato: ${dadosVenda.contrato}\nVendedor: ${nomeVendedor}\nPlanilha: ${planilha}\nStatus: ${status}`);
 
                     } catch (erroApi) {
                         logger.error(`Falha inicial no contrato ${dadosVenda.contrato}. Transferindo para fila de resiliência.`);
@@ -228,7 +221,7 @@ async function processarMensagem(msg) {
                     }
 
                 } else {
-                    msg.reply(`[AVISO] Contrato detectado, mas o usuário não possui permissão.\\nPor favor, envie o seu número entre hashtags para solicitar acesso ao administrador:\\n*#556799999999#*`);
+                    msg.reply(`[AVISO] Contrato detectado, mas o usuário não possui permissão.\nPor favor, envie o seu número entre hashtags para solicitar acesso ao administrador:\n*#556799999999#*`);
                 }
             }
         }
@@ -237,13 +230,12 @@ async function processarMensagem(msg) {
     }
 }
 
-// --- EVENTOS ---
 client.on('qr', (qr) => qrcode.generate(qr, { small: true }));
 
 client.on('ready', async () => {
     if (sistemaIniciado) return;
     sistemaIniciado = true;
-    logger.info('>>> MONITOR V11.0 (ENTERPRISE: APROVAÇÃO, RESILIÊNCIA E AUTH) INICIADO <<<');
+    logger.info('>>> MONITOR V11.1 (QUEBRAS DE LINHA CORRIGIDAS) INICIADO <<<');
     carregarMemorias();
 });
 

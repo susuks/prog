@@ -299,11 +299,11 @@ def resolver_captcha_api_direta(api_key: str, site_url: str, site_key: str) -> s
         return ""
 
 
-def fazer_login_com_ia(driver: webdriver.Chrome) -> bool:
+def fazer_login_com_ia(driver) -> bool:
     """
-    Fluxo de login puro: insere credenciais, pede Token à IA e injeta no DOM.
+    Fluxo de login puro: insere credenciais, injeta o token da IA e clica no botão.
     """
-    logger.info("\n[PORTARIA] Acessando a página de login da Tradição...")
+    logger.info("[PORTARIA] Acessando a página de login da Tradição...")
     url_site = "https://intranet.consorciotradicao.com.br/autocred/"
     driver.get(url_site)
 
@@ -353,27 +353,27 @@ def fazer_login_com_ia(driver: webdriver.Chrome) -> bool:
                 logger.error("   -> [FALHA] Sem token válido para prosseguir.")
                 return False
 
-        # RETORNANDO AO MODELO ANTERIOR (ESTÁVEL)
-        time.sleep(1)
+        time.sleep(2)
 
-        # --- VERIFICAÇÃO DE INTEGRIDADE DA SENHA ---
-        campo_senha_final = driver.find_element(By.ID, "j_password")
-        if not campo_senha_final.get_attribute("value"):
-            logger.info("   -> [CORREÇÃO] A senha desapareceu do campo. Reinserindo...")
-            campo_senha_final.clear()
-            campo_senha_final.send_keys(SENHA_LOGIN)
-        # -------------------------------------------
+        # CLIQUE EXPLÍCITO: Mais estável que a tecla ENTER no modo Headless
+        try:
+            btn_entrar = driver.find_element(
+                By.XPATH,
+                "//button[contains(text(), 'Enviar')] | //input[@value='Enviar'] | //button[@type='submit']",
+            )
+            btn_entrar.click()
+        except Exception:  # pylint: disable=broad-exception-caught
+            driver.find_element(By.ID, "j_password").send_keys(Keys.ENTER)
 
-        campo_senha_final.send_keys(Keys.ENTER)
         time.sleep(6)
 
         driver.switch_to.default_content()
         url_atual = driver.current_url.lower()
 
-        # MANTÉM APENAS A CORREÇÃO DE FALSO POSITIVO
-        if "index.asp" in url_atual or "login" in url_atual:
+        # VALIDAÇÃO RIGOROSA: Impede o Falso Positivo
+        if "login" in url_atual or "index.asp" in url_atual:
             logger.error(
-                "   -> [BARRADO] O portal recusou o acesso e retornou para a página inicial."
+                "   -> [BARRADO] O portal recusou o acesso (retornou para a página inicial)."
             )
             return False
 

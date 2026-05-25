@@ -1,18 +1,19 @@
 """
 Motor Principal de Automação de Consórcio V6 (Enterprise).
 
-Implementa autenticação Bearer Token, logging estruturado rotativo e mantém
-o controle de concorrência com o Selenium.
+Implementa autenticação Bearer Token, logging estruturado rotativo, integração
+com o servidor de produção Waitress e mantém o controle de concorrência com
+o Selenium através de travas de thread (Locks).
 """
 
 import time
 import threading
-from waitress import serve
 import logging
 from logging.handlers import RotatingFileHandler
 from flask import Flask, request, jsonify
+from waitress import serve
 
-# Importações dos módulos previamente refatorados
+# Importações dos módulos gerenciadores de dados e navegação
 from gerador_dados import (
     MAX_TENTATIVAS,
     TEMPO_INATIVIDADE_MAXIMO,
@@ -40,18 +41,23 @@ from motor_navegacao import (
 )
 
 # ============================================================================
-# CONFIGURAÇÃO DE LOGGING ESTRUTURADO
+# CONFIGURAÇÃO DE LOGGING ESTRUTURADO ROTATIVO
 # ============================================================================
 logger = logging.getLogger("EnterpriseBot")
 logger.setLevel(logging.INFO)
+
+# Configura o arquivo de log para rotacionar ao atingir 5MB, retendo até 3 backups
 log_handler = RotatingFileHandler(
-    "files/python_sistema.log", maxBytes=5 * 1024 * 1024, backupCount=3
+    "files/python_sistema.log",
+    maxBytes=5 * 1024 * 1024,
+    backupCount=3,
+    encoding="utf-8",
 )
 log_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 log_handler.setFormatter(log_formatter)
 logger.addHandler(log_handler)
 
-# Adiciona log no console também
+# Adiciona o fluxo de logs simultâneo no console do terminal
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(log_formatter)
 logger.addHandler(console_handler)
@@ -61,6 +67,8 @@ logger.addHandler(console_handler)
 # ============================================================================
 app = Flask(__name__)
 driver_global = None
+
+# O Lock impede que a API e a reanálise manipulem o DOM do Chrome ao mesmo tempo
 navegador_lock = threading.Lock()
 TOKEN_API_ESPERADO = "Bearer CHAVE_SECRETA_ENTERPRISE_V6"
 
@@ -138,8 +146,10 @@ def processar_venda():
                             sheet_vend, dados, dados_site, contrato
                         )
                         anotou_vend = True
-                    except Exception as e:  # pylint: disable=broad-exception-caught
-                        logger.error("Falha na planilha do vendedor: %s", e)
+                    except (
+                        Exception  # pylint: disable=broad-exception-caught
+                    ) as e_vend:
+                        logger.error("Falha na planilha do vendedor: %s", e_vend)
 
                 if sheet_geral:
                     try:
@@ -147,8 +157,10 @@ def processar_venda():
                             sheet_geral, dados, dados_site, contrato
                         )
                         anotou_geral = True
-                    except Exception as e:  # pylint: disable=broad-exception-caught
-                        logger.error("Falha na planilha GERAL: %s", e)
+                    except (
+                        Exception  # pylint: disable=broad-exception-caught
+                    ) as e_geral:
+                        logger.error("Falha na planilha GERAL: %s", e_geral)
 
                 if anotou_vend or anotou_geral:
                     destino_log = (
@@ -164,6 +176,14 @@ def processar_venda():
                         contrato, destino_log, vendedor, telefone_vendedor, texto_st
                     )
 
+                    # LOG CLARO DE SUCESSO DE GRAVAÇÃO
+                    logger.info(
+                        "[SUCESSO API] Contrato %s processado e gravado na planilha '%s'. Status: %s",
+                        contrato,
+                        destino_log,
+                        texto_st,
+                    )
+
                     if not dados_site["pago"]:
                         adicionar_para_reanalise(
                             contrato,
@@ -172,6 +192,10 @@ def processar_venda():
                             nome_planilha_vendedor,
                             origem,
                             dados,
+                        )
+                        logger.info(
+                            "   -> Contrato %s inserido na fila de reanálise de 10 minutos.",
+                            contrato,
                         )
 
                     return (
@@ -185,13 +209,21 @@ def processar_venda():
                         200,
                     )
 
+                logger.error(
+                    "API RECUSADA | Falha ao tentar escrever na API do Google Sheets para o contrato %s.",
+                    contrato,
+                )
                 return jsonify({"erro": "Falha na escrita da API do Google."}), 500
 
+            logger.error(
+                "API RECUSADA | Contrato %s não localizado no portal Autocred.",
+                contrato,
+            )
             return jsonify({"erro": "Contrato não localizado no portal."}), 404
 
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.error("Erro interno do motor: %s", str(e))
-            return jsonify({"erro": f"Erro interno: {str(e)}"}), 500
+        except Exception as e_motor:  # pylint: disable=broad-exception-caught
+            logger.error("Erro interno do motor de execução: %s", str(e_motor))
+            return jsonify({"erro": f"Erro interno do motor: {str(e_motor)}"}), 500
 
 
 # ============================================================================
@@ -199,9 +231,9 @@ def processar_venda():
 # ============================================================================
 def loop_reanalise_background():
     """
-    Rotina em segundo plano (Daemon). Varre o arquivo de pendentes e aciona
+    Rotina em segundo plano (Daemon Thread). Varre o arquivo de pendentes e aciona
     o Selenium para contratos cujo intervalo de tempo ultrapassou 10 minutos,
-    mantendo a sessão ativa.
+    gerenciando também os disparos de Keep-Alive da sessão.
     """
     logger.info("Motor de Reanálise Independente Iniciado.")
 
@@ -241,7 +273,7 @@ def loop_reanalise_background():
                     if buscar_contrato(driver_global, contrato):
                         if verificar_apenas_pagamento(driver_global):
                             logger.info(
-                                "PAGAMENTO DETECTADO | Atualizando o status do contrato %s.",
+                                "PAGAMENTO DETECTADO | Atualizando status do contrato %s.",
                                 contrato,
                             )
                             anotou_v, anotou_g = False, False
@@ -319,15 +351,15 @@ def loop_reanalise_background():
                             ESTADO["autenticado"] = False
                         ESTADO["ultimo_keep_alive"] = time.time()
 
-            except Exception as e:  # pylint: disable=broad-exception-caught
-                logger.error("Erro no loop de background protegido: %s", str(e))
+            except Exception as e_bg:  # pylint: disable=broad-exception-caught
+                logger.error("Erro no loop de background protegido: %s", str(e_bg))
 
 
 # ============================================================================
-# PONTO DE ENTRADA DA APLICAÇÃO
+# PONTO DE ENTRADA DA APLICAÇÃO (SERVIDOR WSGI PRODUCTION)
 # ============================================================================
 if __name__ == "__main__":
-    logger.info(">>> INICIANDO SISTEMA ENTERPRISE V6 (API FLASK + SELENIUM + AUTH) <<<")
+    logger.info(">>> INICIANDO SISTEMA ENTERPRISE V6 (WAITRESS WSGI + SELENIUM) <<<")
     driver_global = iniciar_navegador()
 
     logger.info("Executando login imediato na inicialização do sistema...")
@@ -335,11 +367,16 @@ if __name__ == "__main__":
         try:
             garantir_sessao()
         except Exception as e_inicial:  # pylint: disable=broad-exception-caught
-            logger.error("Não foi possível efetuar o login automático: %s", e_inicial)
+            logger.error(
+                "Não foi possível efetuar o login automático inicial: %s", e_inicial
+            )
 
+    # Inicializa o motor de segundo plano para reanálise e manutenção de sessão
     thread_background = threading.Thread(target=loop_reanalise_background, daemon=True)
     thread_background.start()
 
-
-    logger.info("Servidor WSGI de produção (Waitress) iniciado na porta 5000.")
-    serve(app, host='0.0.0.0', port=5000)
+    # Sobe o servidor HTTP através do motor de produção Waitress
+    logger.info(
+        "Servidor WSGI de produção (Waitress) iniciado com sucesso na porta 5000."
+    )
+    serve(app, host="0.0.0.0", port=5000)
