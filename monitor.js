@@ -8,10 +8,10 @@ const winston = require('winston');
 const NOME_GRUPO_ALVO = 'VENDAS'; 
 const ARQUIVO_VENDEDORES = 'files/vendedores.csv';
 const ARQUIVO_LIDS = 'files/mapeamento_lids.json';
+const ARQUIVO_ADMIN = 'files/admin_data.json';
+const ARQUIVO_CONFIG = 'files/config.txt';
 const URL_API_PYTHON = 'http://127.0.0.1:5000/processar_venda';
 const TOKEN_API = 'CHAVE_SECRETA_ENTERPRISE_V6'; 
-
-const NUMERO_ADMIN = '556781494851@c.us'; 
 
 const MAPA_ORIGENS = {
     "1": "DuoTalk", "2": "Tráfego", "3": "Remarketing", "4": "Contato Lucas",
@@ -20,6 +20,8 @@ const MAPA_ORIGENS = {
     "10": "Ctt.L + RMKT pessoal", "11": "Site"
 };
 
+let NUMERO_ADMIN_CONFIG = '';
+let adminLid = null;
 let mapaVendedores = {};
 let mapaLids = {};
 let pendentesAprovacao = {}; 
@@ -48,12 +50,39 @@ const client = new Client({
     }
 });
 
-function normalizarId(idBruto) {
-    if (!idBruto) return '';
-    return idBruto.replace(/:.*?@/, '@');
-}
-
 function carregarMemorias() {
+    // 1. Carrega o Número do Admin do config.txt
+    if (fs.existsSync(ARQUIVO_CONFIG)) {
+        const linhas = fs.readFileSync(ARQUIVO_CONFIG, 'utf8').split('\n');
+        for (let linha of linhas) {
+            if (linha.includes('=')) {
+                const partes = linha.split('=');
+                if (partes[0].trim() === 'NUMERO_ADMIN') {
+                    NUMERO_ADMIN_CONFIG = partes[1].replace(/\D/g, '');
+                }
+            }
+        }
+    }
+    if (!NUMERO_ADMIN_CONFIG) {
+        logger.error("[CRÍTICO] NUMERO_ADMIN não foi encontrado no ficheiro config.txt!");
+    }
+
+    // 2. Carrega o LID (Identificador da Meta) do Administrador
+    if (fs.existsSync(ARQUIVO_ADMIN)) {
+        try {
+            const dados = JSON.parse(fs.readFileSync(ARQUIVO_ADMIN, 'utf8'));
+            if (dados.admin_lid) {
+                adminLid = dados.admin_lid;
+                logger.info(`Administrador reconhecido na memória (LID: ${adminLid}).`);
+            }
+        } catch (e) {
+            logger.error("Falha ao ler o ficheiro admin_data.json.");
+        }
+    } else {
+        logger.warn("[SISTEMA] Modo de Setup: Aguardando primeiro cadastro do Administrador via WhatsApp.");
+    }
+
+    // 3. Carrega os Vendedores e LIDs
     mapaVendedores = {};
     if (fs.existsSync(ARQUIVO_VENDEDORES)) {
         fs.createReadStream(ARQUIVO_VENDEDORES)
@@ -77,6 +106,12 @@ function carregarMemorias() {
     }
 }
 
+function salvarAdmin(lid) {
+    adminLid = lid;
+    fs.writeFileSync(ARQUIVO_ADMIN, JSON.stringify({ admin_lid: lid }, null, 4));
+    logger.info(`[SEGURANÇA] Novo Administrador registado e blindado no sistema: ${lid}`);
+}
+
 function salvarMapaLids() {
     fs.writeFileSync(ARQUIVO_LIDS, JSON.stringify(mapaLids, null, 4));
 }
@@ -95,7 +130,7 @@ function extrairDados(texto) {
 setInterval(async () => {
     if (filaRetentativas.length > 0) {
         const item = filaRetentativas.shift();
-        logger.info(`Processando retentativa do contrato ${item.dadosVenda.contrato}...`);
+        logger.info(`A processar retentativa do contrato ${item.dadosVenda.contrato}...`);
         
         try {
             const resposta = await axios.post(URL_API_PYTHON, item.dadosVenda, { 
@@ -124,35 +159,72 @@ async function processarMensagem(msg) {
         const corpoMsg = msg.body;
         if (!corpoMsg) return;
 
-        const idRemetente = normalizarId(msg.author || msg.from);
         const chat = await msg.getChat();
         const isGrupoAlvo = chat.isGroup && chat.name && chat.name.toUpperCase() === NOME_GRUPO_ALVO.toUpperCase();
         const isPrivado = !chat.isGroup;
-        // 1. FLUXO DE APROVAÇÃO ADMINISTRATIVA (Comando #ap#NUMERO#)
-        const numeroAdminLimpo = NUMERO_ADMIN.replace(/\D/g, '');
-        const idRemetenteLimpo = idRemetente.replace(/\D/g, '');
+        const idSessaoBruto = msg.author || msg.from; 
 
-        if (idRemetenteLimpo === numeroAdminLimpo && corpoMsg.startsWith('#ap#') && corpoMsg.endsWith('#')) {
-            const numAprovado = corpoMsg.replace(/\D/g, '');
+        // =====================================================================
+        // EXTRAÇÃO ESTRITA DE COMANDOS (Ignora lixo e formatações ocultas)
+        // =====================================================================
+        const textoLimpo = corpoMsg.trim();
+
+        let comandoAprovacao = null;
+        const matchAp = textoLimpo.match(/^@(\d+)@$/);
+        if (matchAp) comandoAprovacao = matchAp[1];
+
+        let comandoCadastro = null;
+        const matchCad = textoLimpo.match(/^-(\d+)-$/);
+        if (matchCad) comandoCadastro = matchCad[1];
+
+        if (comandoAprovacao || comandoCadastro) {
+            logger.info(`[SISTEMA LIDA] ID Sessão: '${idSessaoBruto}' | Aprov: '${comandoAprovacao}' | Cad: '${comandoCadastro}'`);
+        }
+
+        // =====================================================================
+        // MODO SETUP: AGUARDANDO CONFIGURAÇÃO DO ADMINISTRADOR
+        // =====================================================================
+        if (!adminLid) {
+            if (comandoCadastro) {
+                if (comandoCadastro === NUMERO_ADMIN_CONFIG) {
+                    salvarAdmin(idSessaoBruto);
+                    msg.reply(`[SISTEMA] Autoridade máxima reconhecida. Você foi registado como Administrador com sucesso! O sistema está agora destrancado.`);
+                } else {
+                    msg.reply(`[ERRO DE SEGURANÇA] O número fornecido não coincide com a chave mestra configurada no sistema.`);
+                }
+            } else if (isPrivado && !msg.fromMe) {
+                msg.reply(`[SISTEMA TRANCADO] O Administrador do sistema ainda não efetuou o login inicial.\n\nSe você é o administrador, envie o seu número cadastrado no config.txt no seguinte formato:\n*-SEUNUMERO-*`);
+            }
+            return; // Bloqueia todas as outras funções até o Admin existir
+        }
+
+        // =====================================================================
+        // MODO NORMAL: OPERAÇÃO PADRÃO DO SISTEMA
+        // =====================================================================
+        const isAdmin = (idSessaoBruto === adminLid);
+
+        // 1. FLUXO DE APROVAÇÃO ADMINISTRATIVA (@NUMERO@)
+        if (isAdmin && comandoAprovacao) {
+            const numAprovado = comandoAprovacao;
             if (pendentesAprovacao[numAprovado]) {
-                const idVendedor = pendentesAprovacao[numAprovado].idRemetente;
-                mapaLids[idVendedor] = numAprovado;
+                const idVendedorRaw = pendentesAprovacao[numAprovado].idSessaoBruto;
+                mapaLids[idVendedorRaw] = numAprovado;
                 salvarMapaLids();
                 
                 delete pendentesAprovacao[numAprovado];
                 
                 msg.reply(`[ADMINISTRATIVO] Acesso liberado para o número ${numAprovado}.`);
-                client.sendMessage(idVendedor, `[SUCESSO] O seu acesso foi aprovado pela administração. Você já pode enviar contratos.`);
-                logger.info(`Administrador aprovou o número ${numAprovado}.`);
+                client.sendMessage(idVendedorRaw, `[SUCESSO] O seu acesso foi aprovado pela administração. Você já pode enviar contratos.`);
+                logger.info(`Administrador autorizou o ID de sessão: ${idVendedorRaw} -> Número: ${numAprovado}`);
             } else {
                 msg.reply(`[AVISO] O número ${numAprovado} não possui solicitação pendente ou o tempo expirou.`);
             }
             return;
         }
 
-        const matchCadastro = corpoMsg.match(/^#(\d+)#$/);
-        if (matchCadastro) {
-            const numeroFornecido = matchCadastro[1];
+        // 2. FLUXO DE SOLICITAÇÃO DO VENDEDOR (-NUMERO-)
+        if (comandoCadastro && !isAdmin) {
+            const numeroFornecido = comandoCadastro;
             
             let nomeEncontrado = null;
             for (let tel in mapaVendedores) {
@@ -163,18 +235,20 @@ async function processarMensagem(msg) {
             }
 
             if (nomeEncontrado) {
-                pendentesAprovacao[numeroFornecido] = { idRemetente: idRemetente };
+                pendentesAprovacao[numeroFornecido] = { idSessaoBruto: idSessaoBruto };
                 
                 msg.reply(`[AGUARDANDO] Identidade reconhecida (${nomeEncontrado}). Solicitação enviada à administração. Aguarde aprovação.`);
-                client.sendMessage(NUMERO_ADMIN, `[SOLICITAÇÃO DE ACESSO]\nVendedor: ${nomeEncontrado}\nNúmero: ${numeroFornecido}\n\nResponda com o comando exato abaixo para aprovar:\n#ap#${numeroFornecido}#`);
+                
+                // Dispara o pedido de aprovação para o LID do Administrador Supremo
+                client.sendMessage(adminLid, `[SOLICITAÇÃO DE ACESSO]\nVendedor: ${nomeEncontrado}\nNúmero: ${numeroFornecido}\n\nResponda com o comando exato abaixo para aprovar:\n@${numeroFornecido}@`);
                 logger.info(`Nova solicitação de acesso de ${nomeEncontrado} (${numeroFornecido}).`);
 
                 setTimeout(() => {
                     if (pendentesAprovacao[numeroFornecido]) {
                         delete pendentesAprovacao[numeroFornecido];
-                        client.sendMessage(idRemetente, `[RECUSADO] O tempo para aprovação da sua solicitação expirou (10 minutos). Tente novamente.`);
-                        client.sendMessage(NUMERO_ADMIN, `[AVISO] A solicitação do número ${numeroFornecido} expirou.`);
-                        logger.info(`Solicitação de ${numeroFornecido} expirou por falta de ação administrativa.`);
+                        client.sendMessage(idSessaoBruto, `[RECUSADO] O tempo para aprovação da sua solicitação expirou (10 minutos). Tente novamente.`);
+                        client.sendMessage(adminLid, `[AVISO] A solicitação do número ${numeroFornecido} expirou por inatividade.`);
+                        logger.info(`Solicitação de ${numeroFornecido} expirou.`);
                     }
                 }, 600000);
             } else {
@@ -183,26 +257,33 @@ async function processarMensagem(msg) {
             return;
         }
 
+        // 3. FLUXO DE PROCESSAMENTO DE CONTRATO
         if (isGrupoAlvo || isPrivado) {
             const dadosVenda = extrairDados(corpoMsg);
             
             if (dadosVenda) {
-                const numeroReal = mapaLids[idRemetente] || idRemetente.replace(/\D/g, '');
+                let numeroIdentificador = mapaLids[idSessaoBruto];
                 
+                if (isAdmin) {
+                    numeroIdentificador = NUMERO_ADMIN_CONFIG;
+                }
+
                 let nomeVendedor = "Desconhecido";
-                for (let tel in mapaVendedores) {
-                    if (numeroReal.includes(tel) || tel.includes(numeroReal)) {
-                        nomeVendedor = mapaVendedores[tel];
-                        break;
+                if (numeroIdentificador) {
+                    for (let tel in mapaVendedores) {
+                        if (numeroIdentificador.includes(tel) || tel.includes(numeroIdentificador)) {
+                            nomeVendedor = mapaVendedores[tel];
+                            break;
+                        }
                     }
                 }
 
                 if (nomeVendedor !== "Desconhecido") {
                     dadosVenda.vendedor = nomeVendedor;
-                    dadosVenda.telefone = numeroReal;
+                    dadosVenda.telefone = numeroIdentificador;
 
                     const loadingMsg = await msg.reply(`[PROCESSANDO] O contrato ${dadosVenda.contrato} está sendo analisado...`);
-                    logger.info(`Enviando Contrato: ${dadosVenda.contrato} | Vendedor: ${nomeVendedor}`);
+                    logger.info(`A enviar Contrato: ${dadosVenda.contrato} | Vendedor: ${nomeVendedor}`);
 
                     try {
                         const respostaPython = await axios.post(URL_API_PYTHON, dadosVenda, { 
@@ -221,7 +302,7 @@ async function processarMensagem(msg) {
                     }
 
                 } else {
-                    msg.reply(`[AVISO] Contrato detectado, mas o usuário não possui permissão.\nPor favor, envie o seu número entre hashtags para solicitar acesso ao administrador:\n*#556799999999#*`);
+                    msg.reply(`[AVISO] Contrato detetado, mas o utilizador não possui permissão.\nPor favor, envie o seu número entre hífens para solicitar acesso ao administrador:\n*-556799999999-*\n\nNota: Não inclua o 9 adicional do WhatsApp no número.`);
                 }
             }
         }
@@ -235,13 +316,30 @@ client.on('qr', (qr) => qrcode.generate(qr, { small: true }));
 client.on('ready', async () => {
     if (sistemaIniciado) return;
     sistemaIniciado = true;
-    logger.info('>>> MONITOR V11.1 (QUEBRAS DE LINHA CORRIGIDAS) INICIADO <<<');
+    logger.info('>>> MONITOR V12.0 (CONFIG EXTERNADA E MODO DE SETUP) INICIADO <<<');
     carregarMemorias();
 });
 
 client.on('message_create', async (msg) => {
     if (!sistemaIniciado) return;
     await processarMensagem(msg);
+});
+
+// =====================================================================
+// ENCERRAMENTO GRACIOSO (Prevenção de Processos Zumbis e File Lock)
+// =====================================================================
+process.on('SIGINT', async () => {
+    logger.info("Sinal de interrupção recebido. Encerrando o navegador com segurança...");
+    try {
+        if (client) {
+            await client.destroy();
+            logger.info("Navegador do WhatsApp encerrado com sucesso.");
+        }
+        process.exit(0);
+    } catch (err) {
+        logger.error(`Erro ao tentar encerrar os processos: ${err.message}`);
+        process.exit(1);
+    }
 });
 
 client.initialize();

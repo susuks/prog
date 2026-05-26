@@ -5,7 +5,7 @@ echo   INICIANDO SISTEMA DE AUTOMACAO TOTAL
 echo ==========================================
 
 :: 1. Inicia o Coletor Python (Intranet)
-start "1. COLETOR" cmd /k "python main.py"
+::start "1. COLETOR" cmd /k "python main.py"
 
 :: 2. Inicia o Monitor de Vendas (Texto)
 start "2. MONITOR" cmd /k "node monitor.js"
