@@ -50,6 +50,12 @@ const client = new Client({
     }
 });
 
+// NOVA FUNÇÃO: Remove o sufixo de dispositivo (ex: :13) do LID
+function normalizarLid(rawId) {
+    if (!rawId) return '';
+    return rawId.replace(/:.*?@/, '@');
+}
+
 function carregarMemorias() {
     // 1. Carrega o Número do Admin do config.txt
     if (fs.existsSync(ARQUIVO_CONFIG)) {
@@ -126,7 +132,6 @@ function extrairDados(texto) {
     }
     return null;
 }
-
 setInterval(async () => {
     if (filaRetentativas.length > 0) {
         const item = filaRetentativas.shift();
@@ -160,9 +165,15 @@ async function processarMensagem(msg) {
         if (!corpoMsg) return;
 
         const chat = await msg.getChat();
-        const isGrupoAlvo = chat.isGroup && chat.name && chat.name.toUpperCase() === NOME_GRUPO_ALVO.toUpperCase();
-        const isPrivado = !chat.isGroup;
-        const idSessaoBruto = msg.author || msg.from; 
+        
+        // BLOQUEIO: Ignora completamente qualquer mensagem de grupos
+        if (chat.isGroup) return;
+        
+        const isGrupoAlvo = false; // Mantido apenas para compatibilidade de variáveis da V12
+        const isPrivado = true;
+        
+        // APLICAÇÃO: O identificador de sessão é limpo de qualquer sufixo (:13, :14)
+        const idSessaoBruto = normalizarLid(msg.author || msg.from); 
 
         // =====================================================================
         // EXTRAÇÃO ESTRITA DE COMANDOS (Ignora lixo e formatações ocultas)
@@ -316,7 +327,7 @@ client.on('qr', (qr) => qrcode.generate(qr, { small: true }));
 client.on('ready', async () => {
     if (sistemaIniciado) return;
     sistemaIniciado = true;
-    logger.info('>>> MONITOR V12.0 (CONFIG EXTERNADA E MODO DE SETUP) INICIADO <<<');
+    logger.info('>>> MONITOR V12.0 (MODIFICADO COM LID E BLOQUEIO DE GRUPOS) INICIADO <<<');
     carregarMemorias();
 });
 
