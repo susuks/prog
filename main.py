@@ -15,7 +15,6 @@ from waitress import serve
 
 # Importações dos módulos gerenciadores de dados e navegação
 from gerador_dados import (
-    MAX_TENTATIVAS,
     TEMPO_INATIVIDADE_MAXIMO,
     PREFIXO_PLANILHA,
     NOME_ABA,
@@ -46,7 +45,6 @@ from motor_navegacao import (
 logger = logging.getLogger("EnterpriseBot")
 logger.setLevel(logging.INFO)
 
-# Configura o arquivo de log para rotacionar ao atingir 5MB, retendo até 3 backups
 log_handler = RotatingFileHandler(
     "files/python_sistema.log",
     maxBytes=5 * 1024 * 1024,
@@ -57,7 +55,6 @@ log_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 log_handler.setFormatter(log_formatter)
 logger.addHandler(log_handler)
 
-# Adiciona o fluxo de logs simultâneo no console do terminal
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(log_formatter)
 logger.addHandler(console_handler)
@@ -68,23 +65,33 @@ logger.addHandler(console_handler)
 app = Flask(__name__)
 driver_global = None
 
-# O Lock impede que a API e a reanálise manipulem o DOM do Chrome ao mesmo tempo
 navegador_lock = threading.Lock()
 TOKEN_API_ESPERADO = "Bearer CHAVE_SECRETA_ENTERPRISE_V6"
 
-ESTADO = {"autenticado": False, "ultimo_keep_alive": time.time()}
+ESTADO = {"autenticado": False, "ultimo_keep_alive": time.time(), "ultimo_login": 0}
 
 
 def garantir_sessao():
     """
-    Verifica a integridade da sessão web. Caso o portal esteja desconectado,
-    aciona a rotina de Inteligência Artificial para efetuar um novo login.
+    Verifica a integridade da sessão web e garante o ciclo de 4 horas.
+    Caso o portal esteja desconectado ou o tempo tenha expirado, aciona a
+    rotina de Inteligência Artificial para efetuar um novo login na página inicial.
     """
-    if not ESTADO["autenticado"]:
+    agora = time.time()
+    # 14400 segundos equivalem a exatamente 4 horas
+    precisa_relogin = (agora - ESTADO.get("ultimo_login", 0)) > 14400
+
+    if not ESTADO["autenticado"] or precisa_relogin:
+        if precisa_relogin and ESTADO["autenticado"]:
+            logger.info(
+                "[SISTEMA] Ciclo de 4 horas atingido. Executando re-login por segurança."
+            )
+
         if fazer_login_com_ia(driver_global):
             logger.info("[LIBERADO] Acesso restabelecido via Inteligência Artificial.")
             ESTADO["autenticado"] = True
-            ESTADO["ultimo_keep_alive"] = time.time()
+            ESTADO["ultimo_keep_alive"] = agora
+            ESTADO["ultimo_login"] = agora
         else:
             logger.error("[BARRADO] Falha crítica de login.")
             raise ConnectionError("Falha de autenticação no portal Autocred.")
@@ -97,14 +104,11 @@ def garantir_sessao():
 def processar_venda():
     """
     Endpoint HTTP POST. Realiza a validação do Bearer Token, previne a
-    duplicidade de contratos e comanda o motor Selenium para efetuar a
-    gravação dos dados do consorciado.
+    duplicidade de contratos e comanda o motor Selenium.
     """
     auth_header = request.headers.get("Authorization")
     if auth_header != TOKEN_API_ESPERADO:
-        logger.warning(
-            "Tentativa de acesso não autorizada. Token recebido: %s", auth_header
-        )
+        logger.warning("Tentativa de acesso não autorizada. Token: %s", auth_header)
         return jsonify({"erro": "Acesso não autorizado."}), 403
 
     dados = request.json
@@ -135,7 +139,18 @@ def processar_venda():
             sheet_vend = conectar_google_sheets(nome_planilha_vendedor, NOME_ABA)
             sheet_geral = conectar_google_sheets(nome_planilha_geral, NOME_ABA_GERAL)
 
-            if buscar_contrato(driver_global, contrato):
+            # Lógica de Busca com Contingência Única
+            encontrou_contrato = buscar_contrato(driver_global, contrato)
+            if not encontrou_contrato:
+                logger.warning(
+                    "Contrato %s não localizado. Acionando contingência de re-login na API...",
+                    contrato,
+                )
+                ESTADO["autenticado"] = False
+                garantir_sessao()
+                encontrou_contrato = buscar_contrato(driver_global, contrato)
+
+            if encontrou_contrato:
                 dados_site = extrair_dados_completos(driver_global)
                 anotou_vend = False
                 anotou_geral = False
@@ -176,7 +191,6 @@ def processar_venda():
                         contrato, destino_log, vendedor, telefone_vendedor, texto_st
                     )
 
-                    # LOG CLARO DE SUCESSO DE GRAVAÇÃO
                     logger.info(
                         "[SUCESSO API] Contrato %s processado e gravado na planilha '%s'. Status: %s",
                         contrato,
@@ -194,7 +208,7 @@ def processar_venda():
                             dados,
                         )
                         logger.info(
-                            "   -> Contrato %s inserido na fila de reanálise de 10 minutos.",
+                            "   -> Contrato %s inserido na fila de reanálise de 30 dias.",
                             contrato,
                         )
 
@@ -216,7 +230,7 @@ def processar_venda():
                 return jsonify({"erro": "Falha na escrita da API do Google."}), 500
 
             logger.error(
-                "API RECUSADA | Contrato %s não localizado no portal Autocred.",
+                "API RECUSADA | Contrato %s definitivamente não localizado após contingência.",
                 contrato,
             )
             return jsonify({"erro": "Contrato não localizado no portal."}), 404
@@ -227,13 +241,12 @@ def processar_venda():
 
 
 # ============================================================================
-# ROTINA DE BACKGROUND (REANÁLISE DE 10 MINUTOS)
+# ROTINA DE BACKGROUND (REANÁLISE DE 1 HORA / 30 DIAS)
 # ============================================================================
 def loop_reanalise_background():
     """
-    Rotina em segundo plano (Daemon Thread). Varre o arquivo de pendentes e aciona
-    o Selenium para contratos cujo intervalo de tempo ultrapassou 10 minutos,
-    gerenciando também os disparos de Keep-Alive da sessão.
+    Rotina em segundo plano. Varre o arquivo de pendentes a cada 1 hora.
+    Se o contrato não for pago em 30 dias, ele é removido da fila.
     """
     logger.info("Motor de Reanálise Independente Iniciado.")
 
@@ -255,7 +268,24 @@ def loop_reanalise_background():
                     agora = time.time()
                     ultima_verificacao = info.get("ultima_verificacao", 0)
 
-                    if agora - ultima_verificacao < 600:
+                    # Se o contrato não tiver data de inclusão, assume a hora atual para não excluir retroativos precocemente
+                    data_inclusao = info.get("data_inclusao", agora)
+                    if "data_inclusao" not in info:
+                        info["data_inclusao"] = data_inclusao
+                        mudou_pendentes = True
+
+                    # Limite de 30 dias (2.592.000 segundos)
+                    if agora - data_inclusao > 2592000:
+                        logger.warning(
+                            "EXPIROU | Contrato %s atingiu o prazo máximo de 30 dias sem pagamento. Removido.",
+                            contrato,
+                        )
+                        del pendentes[contrato]
+                        mudou_pendentes = True
+                        continue
+
+                    # Intervalo de reanálise de 1 HORA (3600 segundos)
+                    if agora - ultima_verificacao < 3600:
                         continue
 
                     ESTADO["ultimo_keep_alive"] = agora
@@ -263,14 +293,20 @@ def loop_reanalise_background():
                     info["ultima_verificacao"] = agora
                     mudou_pendentes = True
 
-                    logger.info(
-                        "REANÁLISE | Verificando %s (Tentativa %s/%s)...",
-                        contrato,
-                        info["tentativas"],
-                        MAX_TENTATIVAS,
-                    )
+                    logger.info("REANÁLISE | Verificando %s...", contrato)
 
-                    if buscar_contrato(driver_global, contrato):
+                    # Lógica de Busca com Contingência Única
+                    encontrou_contrato = buscar_contrato(driver_global, contrato)
+                    if not encontrou_contrato:
+                        logger.warning(
+                            "Contrato %s não encontrado na reanálise. Acionando contingência de re-login...",
+                            contrato,
+                        )
+                        ESTADO["autenticado"] = False
+                        garantir_sessao()
+                        encontrou_contrato = buscar_contrato(driver_global, contrato)
+
+                    if encontrou_contrato:
                         if verificar_apenas_pagamento(driver_global):
                             logger.info(
                                 "PAGAMENTO DETECTADO | Atualizando status do contrato %s.",
@@ -324,16 +360,9 @@ def loop_reanalise_background():
                                     "1º Parcela Paga (Reanálise)",
                                 )
                                 del pendentes[contrato]
-                        else:
-                            if info["tentativas"] >= MAX_TENTATIVAS:
-                                logger.warning(
-                                    "EXPIROU | Contrato %s atingiu o limite de tentativas.",
-                                    contrato,
-                                )
-                                del pendentes[contrato]
                     else:
                         logger.warning(
-                            "NÃO ENCONTRADO | Cota %s indisponível. Removida da fila.",
+                            "NÃO ENCONTRADO | Cota %s definitivamente indisponível após contingência. Removida da fila.",
                             contrato,
                         )
                         del pendentes[contrato]
@@ -371,11 +400,9 @@ if __name__ == "__main__":
                 "Não foi possível efetuar o login automático inicial: %s", e_inicial
             )
 
-    # Inicializa o motor de segundo plano para reanálise e manutenção de sessão
     thread_background = threading.Thread(target=loop_reanalise_background, daemon=True)
     thread_background.start()
 
-    # Sobe o servidor HTTP através do motor de produção Waitress
     logger.info(
         "Servidor WSGI de produção (Waitress) iniciado com sucesso na porta 5000."
     )

@@ -301,7 +301,8 @@ def resolver_captcha_api_direta(api_key: str, site_url: str, site_key: str) -> s
 
 def fazer_login_com_ia(driver) -> bool:
     """
-    Fluxo de login puro: insere credenciais, injeta o token da IA e clica no botão.
+    Fluxo de login puro: insere credenciais, injeta o token da IA, clica no botão
+    e estabiliza a sessão na página primária (MasterFrameset).
     """
     logger.info("[PORTARIA] Acessando a página de login da Tradição...")
     url_site = "https://intranet.consorciotradicao.com.br/autocred/"
@@ -376,6 +377,11 @@ def fazer_login_com_ia(driver) -> bool:
                 "   -> [BARRADO] O portal recusou o acesso (retornou para a página inicial)."
             )
             return False
+
+        # ESTABILIZAÇÃO OBRIGATÓRIA NOS FRAMES
+        logger.info("   -> [SUCESSO] Redirecionando e ancorando no MasterFrameset...")
+        driver.get("https://intranet.consorciotradicao.com.br/autocred/MasterFrameset.asp")
+        time.sleep(2)
 
         return True
 

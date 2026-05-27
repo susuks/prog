@@ -9,6 +9,7 @@ arquivos locais (JSON, CSV) e integração com a API do Google Sheets.
 import os
 import json
 import re
+import time
 import logging
 from datetime import datetime, timedelta, timezone
 import gspread
@@ -75,7 +76,7 @@ def obter_mes_utc4() -> str:
     """
     meses_pt = {
         1: "JANEIRO",
-        2: "FEVEREIRO",
+        2: "FEVEREIRO ",
         3: "MARÇO",
         4: "ABRIL",
         5: "MAIO",
@@ -83,7 +84,7 @@ def obter_mes_utc4() -> str:
         7: "JULHO",
         8: "AGOSTO",
         9: "SETEMBRO",
-        10: "OUTUBRO",
+        10: "OUTUBRO ",
         11: "NOVEMBRO",
         12: "DEZEMBRO",
     }
@@ -183,7 +184,8 @@ def adicionar_para_reanalise(
     dados_completos: dict,
 ) -> None:
     """
-    Registra um contrato pendente de pagamento na memória de curto prazo (JSON).
+    Registra um contrato pendente de pagamento na memória de curto prazo (JSON),
+    incluindo a data exata de inclusão para controle do prazo de 30 dias.
     """
     pendentes = carregar_pendentes()
     pendentes[contrato] = {
@@ -194,9 +196,10 @@ def adicionar_para_reanalise(
         "dados_originais": dados_completos,
         "tentativas": 0,
         "ultima_verificacao": 0,
+        "data_inclusao": time.time()  # Carimbo de tempo exato de entrada
     }
     salvar_pendentes(pendentes)
-    logger.info("   [AGENDADO] Contrato %s adicionado à reanálise.", contrato)
+    logger.info("   [AGENDADO] Contrato %s adicionado à reanálise de 30 dias.", contrato)
 
 
 def salvar_historico_concluido(
