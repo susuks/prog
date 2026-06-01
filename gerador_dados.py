@@ -73,6 +73,7 @@ def carregar_configuracoes() -> dict:
 def obter_mes_utc4() -> str:
     """
     Calcula a data e hora atual no fuso horário UTC-4 e retorna o mês correspondente.
+    Avaliação dinâmica para evitar o congelamento da variável em viradas de mês.
     """
     meses_pt = {
         1: "JANEIRO",
@@ -100,7 +101,7 @@ SENHA_LOGIN = CONFIG.get("SENHA")
 PREFIXO_PLANILHA = CONFIG.get("PREFIXO_PLANILHA")
 NOME_ABA_GERAL = CONFIG.get("ANO_GERAL")
 MODO_DESKTOP = CONFIG.get("MODO_DESKTOP")
-NOME_ABA = obter_mes_utc4()
+# NOME_ABA removido do escopo global. Será invocado dinamicamente.
 
 
 # ============================================================================
@@ -196,10 +197,12 @@ def adicionar_para_reanalise(
         "dados_originais": dados_completos,
         "tentativas": 0,
         "ultima_verificacao": 0,
-        "data_inclusao": time.time()  # Carimbo de tempo exato de entrada
+        "data_inclusao": time.time(),
     }
     salvar_pendentes(pendentes)
-    logger.info("   [AGENDADO] Contrato %s adicionado à reanálise de 30 dias.", contrato)
+    logger.info(
+        "   [AGENDADO] Contrato %s adicionado à reanálise de 30 dias.", contrato
+    )
 
 
 def salvar_historico_concluido(
@@ -332,12 +335,16 @@ def atualizar_planilha_vendedor(
     Compila os dados raspados e injeta na planilha individual do Vendedor.
     """
     linha = encontrar_proxima_linha_vazia(sheet, start_row=12, check_col=4)
-    status_pag = "1º Parcela Paga" if dados_site["pago"] else ""
+    status_pag = "1º Parcela Paga" if dados_site.get("pago") else ""
+
+    telefone_limpo = re.sub(r"\D", "", str(dados_site.get("telefone", "")))
+    if telefone_limpo and not telefone_limpo.startswith("55"):
+        telefone_limpo = f"55{telefone_limpo}"
 
     dados_cadastrais = [
-        str(dados_site["data_venda"]),
-        str(dados_site["nome"]),
-        str(dados_site["telefone"]),
+        str(dados_site.get("data_venda", "")),
+        str(dados_site.get("nome", "")),
+        telefone_limpo,
         "",
         str(row_csv.get("origem", "")),
     ]
@@ -353,12 +360,13 @@ def atualizar_planilha_vendedor(
         pass
 
     dados_financeiros = [
-        dados_site["credito"],
+        dados_site.get("credito", 0.00),
         lance_val,
         "",
         str(contrato),
-        str(dados_site["grupo"]),
-        str(dados_site["cota"]),
+        str(dados_site.get("grupo", "")),
+        str(dados_site.get("cota", "")),
+        str(dados_site.get("estado", "")),
     ]
 
     sheet.update_cell(linha, 2, status_pag)
@@ -367,8 +375,9 @@ def atualizar_planilha_vendedor(
         values=[dados_cadastrais],
         value_input_option="USER_ENTERED",
     )
+    # Extensão do intervalo até à coluna P para acomodar a variável 'estado'
     sheet.update(
-        range_name=f"J{linha}:O{linha}",
+        range_name=f"J{linha}:P{linha}",
         values=[dados_financeiros],
         value_input_option="USER_ENTERED",
     )
@@ -383,12 +392,16 @@ def atualizar_planilha_geral(
     Compila os dados raspados e injeta na planilha GERAL (Gestão Centralizada).
     """
     linha = encontrar_proxima_linha_vazia(sheet, start_row=7, check_col=3)
-    status_pag = "1º Parcela Paga" if dados_site["pago"] else ""
+    status_pag = "1º Parcela Paga" if dados_site.get("pago") else ""
+
+    telefone_limpo = re.sub(r"\D", "", str(dados_site.get("telefone", "")))
+    if telefone_limpo and not telefone_limpo.startswith("55"):
+        telefone_limpo = f"55{telefone_limpo}"
 
     dados_cadastrais = [
-        str(dados_site["data_venda"]),
-        str(dados_site["nome"]),
-        str(dados_site["telefone"]),
+        str(dados_site.get("data_venda", "")),
+        str(dados_site.get("nome", "")),
+        telefone_limpo,
         "",
         str(row_csv.get("origem", "")),
     ]
@@ -404,12 +417,15 @@ def atualizar_planilha_geral(
         pass
 
     dados_financeiros = [
-        dados_site["credito"],
+        dados_site.get("credito", 0.00),
         lance_val,
         "",
         str(contrato),
-        str(dados_site["grupo"]),
-        str(dados_site["cota"]),
+        str(dados_site.get("grupo", "")),
+        str(dados_site.get("cota", "")),
+        str(dados_site.get("estado", "")),
+        str(dados_site.get("cpf", "")),
+        str(row_csv.get("vendedor", "")),
     ]
 
     sheet.update_cell(linha, 1, status_pag)
@@ -418,8 +434,9 @@ def atualizar_planilha_geral(
         values=[dados_cadastrais],
         value_input_option="USER_ENTERED",
     )
+    # Extensão do intervalo até à coluna Q para acomodar 'estado', 'cpf' e 'vendedor'
     sheet.update(
-        range_name=f"I{linha}:N{linha}",
+        range_name=f"I{linha}:Q{linha}",
         values=[dados_financeiros],
         value_input_option="USER_ENTERED",
     )

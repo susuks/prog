@@ -154,11 +154,20 @@ def extrair_dados_completos(driver: webdriver.Chrome) -> dict:
         "grupo": "-",
         "cota": "-",
         "pago": False,
+        "cpf": "-",
+        "estado": "-",
     }
 
     try:
         xpath_nome = "//td[contains(text(), 'Consorciado:')]/following-sibling::td"
         dados["nome"] = driver.find_element(By.XPATH, xpath_nome).text
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass
+
+    # Captura Imediata do CPF (Disponível na tela principal)
+    try:
+        xpath_cpf = "//td[contains(text(), 'CPF/CNPJ:')]/following-sibling::td"
+        dados["cpf"] = driver.find_element(By.XPATH, xpath_cpf).text.strip()
     except Exception:  # pylint: disable=broad-exception-caught
         pass
 
@@ -195,6 +204,7 @@ def extrair_dados_completos(driver: webdriver.Chrome) -> dict:
     except Exception:  # pylint: disable=broad-exception-caught
         pass
 
+    # Navegação para coletar o Telefone
     try:
         driver.find_element(By.XPATH, "//*[contains(text(), 'Telefones')]").click()
         time.sleep(PAUSA_HUMANA)
@@ -203,6 +213,30 @@ def extrair_dados_completos(driver: webdriver.Chrome) -> dict:
             EC.presence_of_element_located((By.XPATH, xpath_celular))
         )
         dados["telefone"] = elem_celular.text.strip()
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass
+
+    # Navegação para coletar o Estado (Endereço Residencial)
+    try:
+        # Retorna para a aba principal "Consorciado"
+        aba_consorciado = WebDriverWait(driver, 5).until(
+            EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'Consorciado')]"))
+        )
+        aba_consorciado.click()
+        time.sleep(PAUSA_HUMANA)
+
+        # Clica na sub-aba "Endereço Residencial"
+        aba_endereco = WebDriverWait(driver, 5).until(
+            EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'Endereço Residencial')] | //td[contains(text(), 'Endereço Residencial')]"))
+        )
+        aba_endereco.click()
+        time.sleep(PAUSA_HUMANA)
+
+        # Extrai o Estado usando o ID exato validado no DOM
+        elem_estado = WebDriverWait(driver, 5).until(
+            EC.presence_of_element_located((By.ID, "ESTADO"))
+        )
+        dados["estado"] = elem_estado.get_attribute("value").strip()
     except Exception:  # pylint: disable=broad-exception-caught
         pass
 

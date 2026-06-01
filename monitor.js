@@ -5,7 +5,6 @@ const csv = require('csv-parser');
 const axios = require('axios');
 const winston = require('winston');
 
-const NOME_GRUPO_ALVO = 'VENDAS'; 
 const ARQUIVO_VENDEDORES = 'files/vendedores.csv';
 const ARQUIVO_LIDS = 'files/mapeamento_lids.json';
 const ARQUIVO_ADMIN = 'files/admin_data.json';
@@ -44,78 +43,45 @@ const logger = winston.createLogger({
 const client = new Client({
     authStrategy: new LocalAuth(),
     authTimeoutMs: 120000, 
-    puppeteer: { 
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu']
-    }
+    puppeteer: { headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu'] }
 });
 
-// NOVA FUNÇÃO: Remove o sufixo de dispositivo (ex: :13) do LID
 function normalizarLid(rawId) {
     if (!rawId) return '';
-    return rawId.replace(/:.*?@/, '@');
+    try {
+        const partes = rawId.split('@');
+        return partes.length < 2 ? rawId : `${partes[0].split(':')[0]}@${partes[1]}`;
+    } catch(e) { return rawId; }
 }
 
 function carregarMemorias() {
-    // 1. Carrega o Número do Admin do config.txt
     if (fs.existsSync(ARQUIVO_CONFIG)) {
         const linhas = fs.readFileSync(ARQUIVO_CONFIG, 'utf8').split('\n');
         for (let linha of linhas) {
             if (linha.includes('=')) {
                 const partes = linha.split('=');
-                if (partes[0].trim() === 'NUMERO_ADMIN') {
-                    NUMERO_ADMIN_CONFIG = partes[1].replace(/\D/g, '');
-                }
+                if (partes[0].trim() === 'NUMERO_ADMIN') NUMERO_ADMIN_CONFIG = partes[1].replace(/\D/g, '');
             }
         }
     }
-    if (!NUMERO_ADMIN_CONFIG) {
-        logger.error("[CRÍTICO] NUMERO_ADMIN não foi encontrado no ficheiro config.txt!");
-    }
-
-    // 2. Carrega o LID (Identificador da Meta) do Administrador
     if (fs.existsSync(ARQUIVO_ADMIN)) {
-        try {
-            const dados = JSON.parse(fs.readFileSync(ARQUIVO_ADMIN, 'utf8'));
-            if (dados.admin_lid) {
-                adminLid = dados.admin_lid;
-                logger.info(`Administrador reconhecido na memória (LID: ${adminLid}).`);
-            }
-        } catch (e) {
-            logger.error("Falha ao ler o ficheiro admin_data.json.");
-        }
-    } else {
-        logger.warn("[SISTEMA] Modo de Setup: Aguardando primeiro cadastro do Administrador via WhatsApp.");
+        try { adminLid = JSON.parse(fs.readFileSync(ARQUIVO_ADMIN, 'utf8')).admin_lid; } catch (e) {}
     }
-
-    // 3. Carrega os Vendedores e LIDs
     mapaVendedores = {};
     if (fs.existsSync(ARQUIVO_VENDEDORES)) {
-        fs.createReadStream(ARQUIVO_VENDEDORES)
-            .pipe(csv({ mapHeaders: ({ header }) => header.trim().replace(/^[\uFEFF\xEF\xBB\xBF]+/, '') }))
-            .on('data', (row) => {
-                try {
-                    const telBruto = row.telefone || row.Telefone || "";
-                    const tel = telBruto ? String(telBruto).replace(/\D/g, '') : null;
-                    const nome = row.nome_planilha || row.nome || row.Nome;
-                    if (tel && nome) mapaVendedores[tel] = nome;
-                } catch (e) {}
-            })
-            .on('end', () => logger.info(`${Object.keys(mapaVendedores).length} vendedores mestres carregados.`));
+        fs.createReadStream(ARQUIVO_VENDEDORES).pipe(csv()).on('data', (row) => {
+            const tel = (row.telefone || row.Telefone || "").replace(/\D/g, '');
+            const nome = row.nome_planilha || row.nome || row.Nome;
+            if (tel && nome) mapaVendedores[tel] = nome;
+        });
     }
-
-    if (fs.existsSync(ARQUIVO_LIDS)) {
-        try {
-            mapaLids = JSON.parse(fs.readFileSync(ARQUIVO_LIDS, 'utf8'));
-            logger.info(`${Object.keys(mapaLids).length} IDs reconhecidos na memória.`);
-        } catch (e) { mapaLids = {}; }
-    }
+    if (fs.existsSync(ARQUIVO_LIDS)) { try { mapaLids = JSON.parse(fs.readFileSync(ARQUIVO_LIDS, 'utf8')); } catch (e) {} }
 }
 
 function salvarAdmin(lid) {
     adminLid = lid;
     fs.writeFileSync(ARQUIVO_ADMIN, JSON.stringify({ admin_lid: lid }, null, 4));
-    logger.info(`[SEGURANÇA] Novo Administrador registado e blindado no sistema: ${lid}`);
+    logger.info(`[SEGURANÇA] Novo Administrador registrado e blindado no sistema: ${lid}`);
 }
 
 function salvarMapaLids() {
@@ -132,20 +98,27 @@ function extrairDados(texto) {
     }
     return null;
 }
+
 setInterval(async () => {
     if (filaRetentativas.length > 0) {
         const item = filaRetentativas.shift();
-        logger.info(`A processar retentativa do contrato ${item.dadosVenda.contrato}...`);
+        logger.info(`Processando retentativa do contrato ${item.dadosVenda.contrato}...`);
         
         try {
             const resposta = await axios.post(URL_API_PYTHON, item.dadosVenda, { 
                 headers: { 'Authorization': `Bearer ${TOKEN_API}` },
-                timeout: 60000 
+                timeout: 180000 
             });
             const status = resposta.data.status_pagamento;
             const planilha = resposta.data.planilha;
             item.loadingMsg.edit(`[REGISTRADO] Contrato validado com sucesso (após retentativa).\n\nContrato: ${item.dadosVenda.contrato}\nVendedor: ${item.dadosVenda.vendedor}\nPlanilha: ${planilha}\nStatus: ${status}`);
         } catch (erroApi) {
+            if (erroApi.response && erroApi.response.status === 409) {
+                item.loadingMsg.edit(`[REGISTRADO] O contrato ${item.dadosVenda.contrato} já foi processado e gravado com sucesso no sistema.`);
+                logger.info(`Retentativa cancelada: Contrato ${item.dadosVenda.contrato} já se encontrava registrado (Erro 409).`);
+                return;
+            }
+
             item.tentativas += 1;
             if (item.tentativas < 3) {
                 filaRetentativas.push(item);
@@ -166,18 +139,11 @@ async function processarMensagem(msg) {
 
         const chat = await msg.getChat();
         
-        // BLOQUEIO: Ignora completamente qualquer mensagem de grupos
         if (chat.isGroup) return;
         
-        const isGrupoAlvo = false; // Mantido apenas para compatibilidade de variáveis da V12
         const isPrivado = true;
-        
-        // APLICAÇÃO: O identificador de sessão é limpo de qualquer sufixo (:13, :14)
         const idSessaoBruto = normalizarLid(msg.author || msg.from); 
 
-        // =====================================================================
-        // EXTRAÇÃO ESTRITA DE COMANDOS (Ignora lixo e formatações ocultas)
-        // =====================================================================
         const textoLimpo = corpoMsg.trim();
 
         let comandoAprovacao = null;
@@ -192,29 +158,22 @@ async function processarMensagem(msg) {
             logger.info(`[SISTEMA LIDA] ID Sessão: '${idSessaoBruto}' | Aprov: '${comandoAprovacao}' | Cad: '${comandoCadastro}'`);
         }
 
-        // =====================================================================
-        // MODO SETUP: AGUARDANDO CONFIGURAÇÃO DO ADMINISTRADOR
-        // =====================================================================
         if (!adminLid) {
             if (comandoCadastro) {
                 if (comandoCadastro === NUMERO_ADMIN_CONFIG) {
                     salvarAdmin(idSessaoBruto);
-                    msg.reply(`[SISTEMA] Autoridade máxima reconhecida. Você foi registado como Administrador com sucesso! O sistema está agora destrancado.`);
+                    msg.reply(`[SISTEMA] Autoridade máxima reconhecida. O sistema está agora destrancado.`);
                 } else {
                     msg.reply(`[ERRO DE SEGURANÇA] O número fornecido não coincide com a chave mestra configurada no sistema.`);
                 }
             } else if (isPrivado && !msg.fromMe) {
-                msg.reply(`[SISTEMA TRANCADO] O Administrador do sistema ainda não efetuou o login inicial.\n\nSe você é o administrador, envie o seu número cadastrado no config.txt no seguinte formato:\n*-SEUNUMERO-*`);
+                msg.reply(`[SISTEMA TRANCADO] O Administrador do sistema ainda não efetuou o login inicial.\n\nSe você é o administrador, envie o seu número cadastrado no arquivo config.txt no seguinte formato:\n*-SEUNUMERO-*`);
             }
-            return; // Bloqueia todas as outras funções até o Admin existir
+            return; 
         }
 
-        // =====================================================================
-        // MODO NORMAL: OPERAÇÃO PADRÃO DO SISTEMA
-        // =====================================================================
         const isAdmin = (idSessaoBruto === adminLid);
 
-        // 1. FLUXO DE APROVAÇÃO ADMINISTRATIVA (@NUMERO@)
         if (isAdmin && comandoAprovacao) {
             const numAprovado = comandoAprovacao;
             if (pendentesAprovacao[numAprovado]) {
@@ -233,7 +192,6 @@ async function processarMensagem(msg) {
             return;
         }
 
-        // 2. FLUXO DE SOLICITAÇÃO DO VENDEDOR (-NUMERO-)
         if (comandoCadastro && !isAdmin) {
             const numeroFornecido = comandoCadastro;
             
@@ -250,7 +208,6 @@ async function processarMensagem(msg) {
                 
                 msg.reply(`[AGUARDANDO] Identidade reconhecida (${nomeEncontrado}). Solicitação enviada à administração. Aguarde aprovação.`);
                 
-                // Dispara o pedido de aprovação para o LID do Administrador Supremo
                 client.sendMessage(adminLid, `[SOLICITAÇÃO DE ACESSO]\nVendedor: ${nomeEncontrado}\nNúmero: ${numeroFornecido}\n\nResponda com o comando exato abaixo para aprovar:\n@${numeroFornecido}@`);
                 logger.info(`Nova solicitação de acesso de ${nomeEncontrado} (${numeroFornecido}).`);
 
@@ -268,53 +225,55 @@ async function processarMensagem(msg) {
             return;
         }
 
-        // 3. FLUXO DE PROCESSAMENTO DE CONTRATO
-        if (isGrupoAlvo || isPrivado) {
-            const dadosVenda = extrairDados(corpoMsg);
+        const dadosVenda = extrairDados(corpoMsg);
+        
+        if (dadosVenda) {
+            let numeroIdentificador = mapaLids[idSessaoBruto];
             
-            if (dadosVenda) {
-                let numeroIdentificador = mapaLids[idSessaoBruto];
-                
-                if (isAdmin) {
-                    numeroIdentificador = NUMERO_ADMIN_CONFIG;
-                }
+            if (isAdmin) {
+                numeroIdentificador = NUMERO_ADMIN_CONFIG;
+            }
 
-                let nomeVendedor = "Desconhecido";
-                if (numeroIdentificador) {
-                    for (let tel in mapaVendedores) {
-                        if (numeroIdentificador.includes(tel) || tel.includes(numeroIdentificador)) {
-                            nomeVendedor = mapaVendedores[tel];
-                            break;
-                        }
+            let nomeVendedor = "Desconhecido";
+            if (numeroIdentificador) {
+                for (let tel in mapaVendedores) {
+                    if (numeroIdentificador.includes(tel) || tel.includes(numeroIdentificador)) {
+                        nomeVendedor = mapaVendedores[tel];
+                        break;
                     }
                 }
+            }
 
-                if (nomeVendedor !== "Desconhecido") {
-                    dadosVenda.vendedor = nomeVendedor;
-                    dadosVenda.telefone = numeroIdentificador;
+            if (nomeVendedor !== "Desconhecido") {
+                dadosVenda.vendedor = nomeVendedor;
+                dadosVenda.telefone = numeroIdentificador;
 
-                    const loadingMsg = await msg.reply(`[PROCESSANDO] O contrato ${dadosVenda.contrato} está sendo analisado...`);
-                    logger.info(`A enviar Contrato: ${dadosVenda.contrato} | Vendedor: ${nomeVendedor}`);
+                const loadingMsg = await msg.reply(`[PROCESSANDO] O contrato ${dadosVenda.contrato} está sendo analisado...`);
+                logger.info(`Enviando Contrato: ${dadosVenda.contrato} | Vendedor: ${nomeVendedor}`);
 
-                    try {
-                        const respostaPython = await axios.post(URL_API_PYTHON, dadosVenda, { 
-                            headers: { 'Authorization': `Bearer ${TOKEN_API}` },
-                            timeout: 60000 
-                        });
-                        const status = respostaPython.data.status_pagamento;
-                        const planilha = respostaPython.data.planilha;
-                        
-                        loadingMsg.edit(`[REGISTRADO] Contrato validado com sucesso.\n\nContrato: ${dadosVenda.contrato}\nVendedor: ${nomeVendedor}\nPlanilha: ${planilha}\nStatus: ${status}`);
+                try {
+                    const respostaPython = await axios.post(URL_API_PYTHON, dadosVenda, { 
+                        headers: { 'Authorization': `Bearer ${TOKEN_API}` },
+                        timeout: 180000
+                    });
+                    const status = respostaPython.data.status_pagamento;
+                    const planilha = respostaPython.data.planilha;
+                    
+                    loadingMsg.edit(`[REGISTRADO] Contrato validado com sucesso.\n\nContrato: ${dadosVenda.contrato}\nVendedor: ${nomeVendedor}\nPlanilha: ${planilha}\nStatus: ${status}`);
 
-                    } catch (erroApi) {
+                } catch (erroApi) {
+                    if (erroApi.response && erroApi.response.status === 409) {
+                        loadingMsg.edit(`[REGISTRADO] O contrato ${dadosVenda.contrato} já foi processado e gravado com sucesso no sistema.`);
+                        logger.info(`Contrato ${dadosVenda.contrato} já se encontrava registrado (Erro 409). Transferência para fila de resiliência ignorada.`);
+                    } else {
                         logger.error(`Falha inicial no contrato ${dadosVenda.contrato}. Transferindo para fila de resiliência.`);
                         filaRetentativas.push({ dadosVenda, loadingMsg, tentativas: 0 });
-                        loadingMsg.edit(`[AVISO] Falha de comunicação. O sistema tentará registrar o contrato ${dadosVenda.contrato} novamente em background.`);
+                        loadingMsg.edit(`[AVISO] Falha de comunicação ou lentidão no sistema. O bot tentará registrar o contrato ${dadosVenda.contrato} novamente em background.`);
                     }
-
-                } else {
-                    msg.reply(`[AVISO] Contrato detetado, mas o utilizador não possui permissão.\nPor favor, envie o seu número entre hífens para solicitar acesso ao administrador:\n*-556799999999-*\n\nNota: Não inclua o 9 adicional do WhatsApp no número.`);
                 }
+
+            } else {
+                msg.reply(`[AVISO] Contrato detectado, mas o usuário não possui permissão.\nPor favor, envie o seu número entre hífens para solicitar acesso ao administrador:\n*-556799999999-*\n\nNota: Não inclua o 9 adicional do WhatsApp no número.`);
             }
         }
     } catch (e) {
@@ -327,7 +286,7 @@ client.on('qr', (qr) => qrcode.generate(qr, { small: true }));
 client.on('ready', async () => {
     if (sistemaIniciado) return;
     sistemaIniciado = true;
-    logger.info('>>> MONITOR V12.0 (MODIFICADO COM LID E BLOQUEIO DE GRUPOS) INICIADO <<<');
+    logger.info('>>> MONITOR V13.0 (TIMEOUT ALARGADO E LEITURA DE DUPLICIDADE) INICIADO <<<');
     carregarMemorias();
 });
 
@@ -336,9 +295,6 @@ client.on('message_create', async (msg) => {
     await processarMensagem(msg);
 });
 
-// =====================================================================
-// ENCERRAMENTO GRACIOSO (Prevenção de Processos Zumbis e File Lock)
-// =====================================================================
 process.on('SIGINT', async () => {
     logger.info("Sinal de interrupção recebido. Encerrando o navegador com segurança...");
     try {

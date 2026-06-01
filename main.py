@@ -17,8 +17,8 @@ from waitress import serve
 from gerador_dados import (
     TEMPO_INATIVIDADE_MAXIMO,
     PREFIXO_PLANILHA,
-    NOME_ABA,
     NOME_ABA_GERAL,
+    obter_mes_utc4,
     conectar_google_sheets,
     atualizar_planilha_vendedor,
     atualizar_planilha_geral,
@@ -136,7 +136,10 @@ def processar_venda():
             nome_planilha_vendedor = f"{PREFIXO_PLANILHA}{vendedor}"
             nome_planilha_geral = f"{PREFIXO_PLANILHA}GERAL"
 
-            sheet_vend = conectar_google_sheets(nome_planilha_vendedor, NOME_ABA)
+            # Obtém dinamicamente o mês atualizado para não gravar no mês antigo
+            aba_atual = obter_mes_utc4()
+
+            sheet_vend = conectar_google_sheets(nome_planilha_vendedor, aba_atual)
             sheet_geral = conectar_google_sheets(nome_planilha_geral, NOME_ABA_GERAL)
 
             # Lógica de Busca com Contingência Única
@@ -268,7 +271,6 @@ def loop_reanalise_background():
                     agora = time.time()
                     ultima_verificacao = info.get("ultima_verificacao", 0)
 
-                    # Se o contrato não tiver data de inclusão, assume a hora atual para não excluir retroativos precocemente
                     data_inclusao = info.get("data_inclusao", agora)
                     if "data_inclusao" not in info:
                         info["data_inclusao"] = data_inclusao
@@ -314,8 +316,11 @@ def loop_reanalise_background():
                             )
                             anotou_v, anotou_g = False, False
 
+                            # Obtém dinamicamente o mês atualizado para atualizar a aba certa
+                            aba_atual = obter_mes_utc4()
+
                             sheet_v = conectar_google_sheets(
-                                info["nome_planilha"], NOME_ABA
+                                info["nome_planilha"], aba_atual
                             )
                             if sheet_v:
                                 l_v = encontrar_linha_do_contrato(
