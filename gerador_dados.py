@@ -101,7 +101,6 @@ SENHA_LOGIN = CONFIG.get("SENHA")
 PREFIXO_PLANILHA = CONFIG.get("PREFIXO_PLANILHA")
 NOME_ABA_GERAL = CONFIG.get("ANO_GERAL")
 MODO_DESKTOP = CONFIG.get("MODO_DESKTOP")
-# NOME_ABA removido do escopo global. Será invocado dinamicamente.
 
 
 # ============================================================================
@@ -183,10 +182,11 @@ def adicionar_para_reanalise(
     nome_planilha: str,
     origem: str,
     dados_completos: dict,
+    aba_original: str,  # Parâmetro adicionado para a memória de mês
 ) -> None:
     """
     Registra um contrato pendente de pagamento na memória de curto prazo (JSON),
-    incluindo a data exata de inclusão para controle do prazo de 30 dias.
+    incluindo a data de inclusão e a aba original para controle preciso.
     """
     pendentes = carregar_pendentes()
     pendentes[contrato] = {
@@ -198,10 +198,13 @@ def adicionar_para_reanalise(
         "tentativas": 0,
         "ultima_verificacao": 0,
         "data_inclusao": time.time(),
+        "aba_original": aba_original,  # Gravação da aba exata em que o contrato nasceu
     }
     salvar_pendentes(pendentes)
     logger.info(
-        "   [AGENDADO] Contrato %s adicionado à reanálise de 30 dias.", contrato
+        "   [AGENDADO] Contrato %s adicionado à reanálise de 30 dias (Aba: %s).",
+        contrato,
+        aba_original,
     )
 
 
@@ -375,7 +378,6 @@ def atualizar_planilha_vendedor(
         values=[dados_cadastrais],
         value_input_option="USER_ENTERED",
     )
-    # Extensão do intervalo até à coluna P para acomodar a variável 'estado'
     sheet.update(
         range_name=f"J{linha}:P{linha}",
         values=[dados_financeiros],
@@ -434,7 +436,6 @@ def atualizar_planilha_geral(
         values=[dados_cadastrais],
         value_input_option="USER_ENTERED",
     )
-    # Extensão do intervalo até à coluna Q para acomodar 'estado', 'cpf' e 'vendedor'
     sheet.update(
         range_name=f"I{linha}:Q{linha}",
         values=[dados_financeiros],

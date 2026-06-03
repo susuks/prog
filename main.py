@@ -13,7 +13,6 @@ from logging.handlers import RotatingFileHandler
 from flask import Flask, request, jsonify
 from waitress import serve
 
-# Importações dos módulos gerenciadores de dados e navegação
 from gerador_dados import (
     TEMPO_INATIVIDADE_MAXIMO,
     PREFIXO_PLANILHA,
@@ -136,11 +135,15 @@ def processar_venda():
             nome_planilha_vendedor = f"{PREFIXO_PLANILHA}{vendedor}"
             nome_planilha_geral = f"{PREFIXO_PLANILHA}GERAL"
 
-            # Obtém dinamicamente o mês atualizado para não gravar no mês antigo
+            # Obtém dinamicamente o mês atualizado para a gravação
             aba_atual = obter_mes_utc4()
 
+            # Conexões independentes para a aba anual e a aba mensal da planilha GERAL
             sheet_vend = conectar_google_sheets(nome_planilha_vendedor, aba_atual)
-            sheet_geral = conectar_google_sheets(nome_planilha_geral, NOME_ABA_GERAL)
+            sheet_geral_ano = conectar_google_sheets(
+                nome_planilha_geral, NOME_ABA_GERAL
+            )
+            sheet_geral_mes = conectar_google_sheets(nome_planilha_geral, aba_atual)
 
             # Lógica de Busca com Contingência Única
             encontrou_contrato = buscar_contrato(driver_global, contrato)
@@ -169,16 +172,31 @@ def processar_venda():
                     ) as e_vend:
                         logger.error("Falha na planilha do vendedor: %s", e_vend)
 
-                if sheet_geral:
+                if sheet_geral_ano:
                     try:
                         atualizar_planilha_geral(
-                            sheet_geral, dados, dados_site, contrato
+                            sheet_geral_ano, dados, dados_site, contrato
                         )
                         anotou_geral = True
                     except (
                         Exception  # pylint: disable=broad-exception-caught
-                    ) as e_geral:
-                        logger.error("Falha na planilha GERAL: %s", e_geral)
+                    ) as e_geral_ano:
+                        logger.error(
+                            "Falha na planilha GERAL (Aba Anual): %s", e_geral_ano
+                        )
+
+                if sheet_geral_mes:
+                    try:
+                        atualizar_planilha_geral(
+                            sheet_geral_mes, dados, dados_site, contrato
+                        )
+                        anotou_geral = True
+                    except (
+                        Exception  # pylint: disable=broad-exception-caught
+                    ) as e_geral_mes:
+                        logger.error(
+                            "Falha na planilha GERAL (Aba Mensal): %s", e_geral_mes
+                        )
 
                 if anotou_vend or anotou_geral:
                     destino_log = (
@@ -186,7 +204,7 @@ def processar_venda():
                     )
                     texto_st = (
                         "1º Parcela Paga"
-                        if dados_site["pago"]
+                        if dados_site.get("pago")
                         else "1º Parcela Não Paga"
                     )
 
@@ -201,7 +219,7 @@ def processar_venda():
                         texto_st,
                     )
 
-                    if not dados_site["pago"]:
+                    if not dados_site.get("pago"):
                         adicionar_para_reanalise(
                             contrato,
                             vendedor,
@@ -209,6 +227,7 @@ def processar_venda():
                             nome_planilha_vendedor,
                             origem,
                             dados,
+                            aba_atual,
                         )
                         logger.info(
                             "   -> Contrato %s inserido na fila de reanálise de 30 dias.",
@@ -316,11 +335,10 @@ def loop_reanalise_background():
                             )
                             anotou_v, anotou_g = False, False
 
-                            # Obtém dinamicamente o mês atualizado para atualizar a aba certa
-                            aba_atual = obter_mes_utc4()
+                            aba_salva = info.get("aba_original", obter_mes_utc4())
 
                             sheet_v = conectar_google_sheets(
-                                info["nome_planilha"], aba_atual
+                                info["nome_planilha"], aba_salva
                             )
                             if sheet_v:
                                 l_v = encontrar_linha_do_contrato(
@@ -335,16 +353,36 @@ def loop_reanalise_background():
                                     ):
                                         pass
 
-                            sheet_g = conectar_google_sheets(
+                            sheet_g_ano = conectar_google_sheets(
                                 f"{PREFIXO_PLANILHA}GERAL", NOME_ABA_GERAL
                             )
-                            if sheet_g:
-                                l_g = encontrar_linha_do_contrato(
-                                    sheet_g, contrato, col_idx=12
+                            if sheet_g_ano:
+                                l_g_ano = encontrar_linha_do_contrato(
+                                    sheet_g_ano, contrato, col_idx=12
                                 )
-                                if l_g:
+                                if l_g_ano:
                                     try:
-                                        sheet_g.update_cell(l_g, 1, "1º Parcela Paga")
+                                        sheet_g_ano.update_cell(
+                                            l_g_ano, 1, "1º Parcela Paga"
+                                        )
+                                        anotou_g = True
+                                    except (
+                                        Exception  # pylint: disable=broad-exception-caught
+                                    ):
+                                        pass
+
+                            sheet_g_mes = conectar_google_sheets(
+                                f"{PREFIXO_PLANILHA}GERAL", aba_salva
+                            )
+                            if sheet_g_mes:
+                                l_g_mes = encontrar_linha_do_contrato(
+                                    sheet_g_mes, contrato, col_idx=12
+                                )
+                                if l_g_mes:
+                                    try:
+                                        sheet_g_mes.update_cell(
+                                            l_g_mes, 1, "1º Parcela Paga"
+                                        )
                                         anotou_g = True
                                     except (
                                         Exception  # pylint: disable=broad-exception-caught
