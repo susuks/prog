@@ -182,7 +182,7 @@ def adicionar_para_reanalise(
     nome_planilha: str,
     origem: str,
     dados_completos: dict,
-    aba_original: str,  # Parâmetro adicionado para a memória de mês
+    aba_original: str,
 ) -> None:
     """
     Registra um contrato pendente de pagamento na memória de curto prazo (JSON),
@@ -198,7 +198,7 @@ def adicionar_para_reanalise(
         "tentativas": 0,
         "ultima_verificacao": 0,
         "data_inclusao": time.time(),
-        "aba_original": aba_original,  # Gravação da aba exata em que o contrato nasceu
+        "aba_original": aba_original,
     }
     salvar_pendentes(pendentes)
     logger.info(
@@ -392,6 +392,7 @@ def atualizar_planilha_geral(
 ) -> str:
     """
     Compila os dados raspados e injeta na planilha GERAL (Gestão Centralizada).
+    Adiciona a data de registro na coluna R.
     """
     linha = encontrar_proxima_linha_vazia(sheet, start_row=7, check_col=3)
     status_pag = "1º Parcela Paga" if dados_site.get("pago") else ""
@@ -418,6 +419,9 @@ def atualizar_planilha_geral(
     except (ValueError, TypeError):
         pass
 
+    fuso_utc4 = timezone(timedelta(hours=-4))
+    data_registro_atual = datetime.now(fuso_utc4).strftime("%d/%m/%Y")
+
     dados_financeiros = [
         dados_site.get("credito", 0.00),
         lance_val,
@@ -428,6 +432,7 @@ def atualizar_planilha_geral(
         str(dados_site.get("estado", "")),
         str(dados_site.get("cpf", "")),
         str(row_csv.get("vendedor", "")),
+        data_registro_atual,  # Coluna R
     ]
 
     sheet.update_cell(linha, 1, status_pag)
@@ -436,8 +441,9 @@ def atualizar_planilha_geral(
         values=[dados_cadastrais],
         value_input_option="USER_ENTERED",
     )
+    # Extensão do intervalo até à coluna R
     sheet.update(
-        range_name=f"I{linha}:Q{linha}",
+        range_name=f"I{linha}:R{linha}",
         values=[dados_financeiros],
         value_input_option="USER_ENTERED",
     )
