@@ -77,7 +77,6 @@ def garantir_sessao():
     rotina de Inteligência Artificial para efetuar um novo login na página inicial.
     """
     agora = time.time()
-    # 14400 segundos equivalem a exatamente 4 horas
     precisa_relogin = (agora - ESTADO.get("ultimo_login", 0)) > 14400
 
     if not ESTADO["autenticado"] or precisa_relogin:
@@ -108,11 +107,22 @@ def processar_venda():
     auth_header = request.headers.get("Authorization")
     if auth_header != TOKEN_API_ESPERADO:
         logger.warning("Tentativa de acesso não autorizada. Token: %s", auth_header)
-        return jsonify({"erro": "Acesso não autorizado."}), 403
+        return (
+            jsonify({"erro": "nao_autorizado", "mensagem": "Acesso não autorizado."}),
+            403,
+        )
 
     dados = request.json
     if not dados:
-        return jsonify({"erro": "O payload da requisição está vazio."}), 400
+        return (
+            jsonify(
+                {
+                    "erro": "payload_vazio",
+                    "mensagem": "O payload da requisição está vazio.",
+                }
+            ),
+            400,
+        )
 
     contrato = str(dados.get("contrato")).strip()
     vendedor = str(dados.get("vendedor")).strip()
@@ -121,29 +131,52 @@ def processar_venda():
 
     logger.info("API RECEBIDA | Contrato: %s | Vendedor: %s", contrato, vendedor)
 
+    # Verificação de duplicidade com envio de mensagem explícita
     if verificar_contrato_registrado(contrato):
         logger.info(
             "RECUSADO | O contrato %s já consta no sistema (Duplicidade).", contrato
         )
-        return jsonify({"erro": "Este contrato já foi registrado anteriormente."}), 409
+        return (
+            jsonify(
+                {
+                    "erro": "duplicidade",
+                    "mensagem": f"O contrato {contrato} já foi processado e gravado anteriormente no sistema.",
+                }
+            ),
+            409,
+        )
 
     with navegador_lock:
         try:
-            garantir_sessao()
-            ESTADO["ultimo_keep_alive"] = time.time()
-
             nome_planilha_vendedor = f"{PREFIXO_PLANILHA}{vendedor}"
             nome_planilha_geral = f"{PREFIXO_PLANILHA}GERAL"
-
-            # Obtém dinamicamente o mês atualizado para a gravação
             aba_atual = obter_mes_utc4()
 
-            # Conexões independentes para a aba anual e a aba mensal da planilha GERAL
+            # Tentativa de conexão com todas as planilhas e abas alvo
             sheet_vend = conectar_google_sheets(nome_planilha_vendedor, aba_atual)
             sheet_geral_ano = conectar_google_sheets(
                 nome_planilha_geral, NOME_ABA_GERAL
             )
             sheet_geral_mes = conectar_google_sheets(nome_planilha_geral, aba_atual)
+
+            # Verificação estrita de infraestrutura das planilhas (Verifica se encontrou tudo)
+            erros_infra = []
+            if not sheet_vend:
+                erros_infra.append(
+                    f"Planilha do Vendedor ({nome_planilha_vendedor}) -> Aba: {aba_atual}"
+                )
+            if not sheet_geral_ano:
+                erros_infra.append(f"Planilha GERAL -> Aba: {NOME_ABA_GERAL}")
+            if not sheet_geral_mes:
+                erros_infra.append(f"Planilha GERAL -> Aba: {aba_atual}")
+
+            if erros_infra:
+                msg_erro = f"Infraestrutura inválida. Não foi possível localizar: {', '.join(erros_infra)}."
+                logger.error("[ERRO INFRAESTRUTURA] %s", msg_erro)
+                return jsonify({"erro": "planilha_ausente", "mensagem": msg_erro}), 404
+
+            garantir_sessao()
+            ESTADO["ultimo_keep_alive"] = time.time()
 
             # Lógica de Busca com Contingência Única
             encontrou_contrato = buscar_contrato(driver_global, contrato)
@@ -158,50 +191,44 @@ def processar_venda():
 
             if encontrou_contrato:
                 dados_site = extrair_dados_completos(driver_global)
+
                 anotou_vend = False
-                anotou_geral = False
+                anotou_geral_ano = False
+                anotou_geral_mes = False
 
-                if sheet_vend:
-                    try:
-                        atualizar_planilha_vendedor(
-                            sheet_vend, dados, dados_site, contrato
-                        )
-                        anotou_vend = True
-                    except (
-                        Exception  # pylint: disable=broad-exception-caught
-                    ) as e_vend:
-                        logger.error("Falha na planilha do vendedor: %s", e_vend)
-
-                if sheet_geral_ano:
-                    try:
-                        atualizar_planilha_geral(
-                            sheet_geral_ano, dados, dados_site, contrato
-                        )
-                        anotou_geral = True
-                    except (
-                        Exception  # pylint: disable=broad-exception-caught
-                    ) as e_geral_ano:
-                        logger.error(
-                            "Falha na planilha GERAL (Aba Anual): %s", e_geral_ano
-                        )
-
-                if sheet_geral_mes:
-                    try:
-                        atualizar_planilha_geral(
-                            sheet_geral_mes, dados, dados_site, contrato
-                        )
-                        anotou_geral = True
-                    except (
-                        Exception  # pylint: disable=broad-exception-caught
-                    ) as e_geral_mes:
-                        logger.error(
-                            "Falha na planilha GERAL (Aba Mensal): %s", e_geral_mes
-                        )
-
-                if anotou_vend or anotou_geral:
-                    destino_log = (
-                        nome_planilha_vendedor if anotou_vend else nome_planilha_geral
+                # Execução das gravações físicas com monitoramento individual
+                try:
+                    atualizar_planilha_vendedor(sheet_vend, dados, dados_site, contrato)
+                    anotou_vend = True
+                except Exception as e_vend:  # pylint: disable=broad-exception-caught
+                    logger.error(
+                        "Falha na gravação da planilha do vendedor: %s", e_vend
                     )
+
+                try:
+                    atualizar_planilha_geral(
+                        sheet_geral_ano, dados, dados_site, contrato
+                    )
+                    anotou_geral_ano = True
+                except Exception as e_geral_ano:  # pylint: disable=broad-exception-caught
+                    logger.error(
+                        "Falha na gravação da planilha GERAL (Aba Anual): %s",
+                        e_geral_ano,
+                    )
+
+                try:
+                    atualizar_planilha_geral(
+                        sheet_geral_mes, dados, dados_site, contrato
+                    )
+                    anotou_geral_mes = True
+                except Exception as e_geral_mes:  # pylint: disable=broad-exception-caught
+                    logger.error(
+                        "Falha na gravação da planilha GERAL (Aba Mensal): %s",
+                        e_geral_mes,
+                    )
+
+                # Condição de Sucesso Estrito: Exige sucesso em 100% dos alvos
+                if anotou_vend and anotou_geral_ano and anotou_geral_mes:
                     texto_st = (
                         "1º Parcela Paga"
                         if dados_site.get("pago")
@@ -209,14 +236,16 @@ def processar_venda():
                     )
 
                     salvar_historico_concluido(
-                        contrato, destino_log, vendedor, telefone_vendedor, texto_st
+                        contrato,
+                        nome_planilha_vendedor,
+                        vendedor,
+                        telefone_vendedor,
+                        texto_st,
                     )
 
                     logger.info(
-                        "[SUCESSO API] Contrato %s processado e gravado na planilha '%s'. Status: %s",
+                        "[SUCESSO API] Contrato %s gravado com sucesso em todas as planilhas e abas.",
                         contrato,
-                        destino_log,
-                        texto_st,
                     )
 
                     if not dados_site.get("pago"):
@@ -239,27 +268,54 @@ def processar_venda():
                             {
                                 "sucesso": True,
                                 "status_pagamento": texto_st,
-                                "planilha": destino_log,
+                                "planilha": nome_planilha_vendedor,
                             }
                         ),
                         200,
                     )
 
-                logger.error(
-                    "API RECUSADA | Falha ao tentar escrever na API do Google Sheets para o contrato %s.",
-                    contrato,
-                )
-                return jsonify({"erro": "Falha na escrita da API do Google."}), 500
+                else:
+                    # Relatório de falhas físicas durante a escrita
+                    erros_gravacao = []
+                    if not anotou_vend:
+                        erros_gravacao.append("Planilha do Vendedor")
+                    if not anotou_geral_ano:
+                        erros_gravacao.append("Planilha GERAL (Aba Anual)")
+                    if not anotou_geral_mes:
+                        erros_gravacao.append("Planilha GERAL (Aba Mensal)")
+
+                    msg_falha = f"Falha na gravação física dos dados. Erro ao atualizar: {', '.join(erros_gravacao)}."
+                    logger.error("[ERRO GRAVAÇÃO] %s", msg_falha)
+                    return (
+                        jsonify({"erro": "falha_gravacao", "mensagem": msg_falha}),
+                        500,
+                    )
 
             logger.error(
                 "API RECUSADA | Contrato %s definitivamente não localizado após contingência.",
                 contrato,
             )
-            return jsonify({"erro": "Contrato não localizado no portal."}), 404
+            return (
+                jsonify(
+                    {
+                        "erro": "contrato_nao_encontrado",
+                        "mensagem": f"O contrato {contrato} não foi localizado no portal Autocred.",
+                    }
+                ),
+                404,
+            )
 
         except Exception as e_motor:  # pylint: disable=broad-exception-caught
             logger.error("Erro interno do motor de execução: %s", str(e_motor))
-            return jsonify({"erro": f"Erro interno do motor: {str(e_motor)}"}), 500
+            return (
+                jsonify(
+                    {
+                        "erro": "erro_interno",
+                        "mensagem": f"Erro interno no motor Python: {str(e_motor)}",
+                    }
+                ),
+                500,
+            )
 
 
 # ============================================================================
@@ -295,7 +351,6 @@ def loop_reanalise_background():
                         info["data_inclusao"] = data_inclusao
                         mudou_pendentes = True
 
-                    # Limite de 30 dias (2.592.000 segundos)
                     if agora - data_inclusao > 2592000:
                         logger.warning(
                             "EXPIROU | Contrato %s atingiu o prazo máximo de 30 dias sem pagamento. Removido.",
@@ -305,7 +360,6 @@ def loop_reanalise_background():
                         mudou_pendentes = True
                         continue
 
-                    # Intervalo de reanálise de 1 HORA (3600 segundos)
                     if agora - ultima_verificacao < 3600:
                         continue
 
@@ -316,7 +370,6 @@ def loop_reanalise_background():
 
                     logger.info("REANÁLISE | Verificando %s...", contrato)
 
-                    # Lógica de Busca com Contingência Única
                     encontrou_contrato = buscar_contrato(driver_global, contrato)
                     if not encontrou_contrato:
                         logger.warning(
@@ -333,76 +386,72 @@ def loop_reanalise_background():
                                 "PAGAMENTO DETECTADO | Atualizando status do contrato %s.",
                                 contrato,
                             )
-                            anotou_v, anotou_g = False, False
+
+                            anotou_v = False
+                            anotou_g_ano = False
+                            anotou_g_mes = False
 
                             aba_salva = info.get("aba_original", obter_mes_utc4())
 
                             sheet_v = conectar_google_sheets(
                                 info["nome_planilha"], aba_salva
                             )
-                            if sheet_v:
-                                l_v = encontrar_linha_do_contrato(
-                                    sheet_v, contrato, col_idx=13
-                                )
-                                if l_v:
-                                    try:
-                                        sheet_v.update_cell(l_v, 2, "1º Parcela Paga")
-                                        anotou_v = True
-                                    except (
-                                        Exception  # pylint: disable=broad-exception-caught
-                                    ):
-                                        pass
-
                             sheet_g_ano = conectar_google_sheets(
                                 f"{PREFIXO_PLANILHA}GERAL", NOME_ABA_GERAL
                             )
-                            if sheet_g_ano:
+                            sheet_g_mes = conectar_google_sheets(
+                                f"{PREFIXO_PLANILHA}GERAL", aba_salva
+                            )
+
+                            # Na reanálise, também exigimos a presença de toda a estrutura antes de atualizar
+                            if sheet_v and sheet_g_ano and sheet_g_mes:
+                                l_v = encontrar_linha_do_contrato(
+                                    sheet_v, contrato, col_idx=13
+                                )
                                 l_g_ano = encontrar_linha_do_contrato(
                                     sheet_g_ano, contrato, col_idx=12
                                 )
-                                if l_g_ano:
+                                l_g_mes = encontrar_linha_do_contrato(
+                                    sheet_g_mes, contrato, col_idx=12
+                                )
+
+                                if l_v and l_g_ano and l_g_mes:
+                                    try:
+                                        sheet_v.update_cell(l_v, 2, "1º Parcela Paga")
+                                        anotou_v = True
+                                    except Exception:  # pylint: disable=broad-exception-caught
+                                        pass
+
                                     try:
                                         sheet_g_ano.update_cell(
                                             l_g_ano, 1, "1º Parcela Paga"
                                         )
-                                        anotou_g = True
-                                    except (
-                                        Exception  # pylint: disable=broad-exception-caught
-                                    ):
+                                        anotou_g_ano = True
+                                    except Exception:  # pylint: disable=broad-exception-caught
                                         pass
 
-                            sheet_g_mes = conectar_google_sheets(
-                                f"{PREFIXO_PLANILHA}GERAL", aba_salva
-                            )
-                            if sheet_g_mes:
-                                l_g_mes = encontrar_linha_do_contrato(
-                                    sheet_g_mes, contrato, col_idx=12
-                                )
-                                if l_g_mes:
                                     try:
                                         sheet_g_mes.update_cell(
                                             l_g_mes, 1, "1º Parcela Paga"
                                         )
-                                        anotou_g = True
-                                    except (
-                                        Exception  # pylint: disable=broad-exception-caught
-                                    ):
+                                        anotou_g_mes = True
+                                    except Exception:  # pylint: disable=broad-exception-caught
                                         pass
 
-                            if anotou_v or anotou_g:
-                                dest = (
-                                    info["nome_planilha"]
-                                    if anotou_v
-                                    else f"{PREFIXO_PLANILHA}GERAL"
-                                )
-                                salvar_historico_concluido(
+                                    if anotou_v and anotou_g_ano and anotou_g_mes:
+                                        salvar_historico_concluido(
+                                            contrato,
+                                            info["nome_planilha"],
+                                            info["vendedor_nome"],
+                                            info["vendedor_tel"],
+                                            "1º Parcela Paga (Reanálise)",
+                                        )
+                                        del pendentes[contrato]
+                            else:
+                                logger.critical(
+                                    "[CRÍTICO REANÁLISE] Estrutura de planilhas corrompida para o contrato %s no background.",
                                     contrato,
-                                    dest,
-                                    info["vendedor_nome"],
-                                    info["vendedor_tel"],
-                                    "1º Parcela Paga (Reanálise)",
                                 )
-                                del pendentes[contrato]
                     else:
                         logger.warning(
                             "NÃO ENCONTRADO | Cota %s definitivamente indisponível após contingência. Removida da fila.",
@@ -440,7 +489,7 @@ if __name__ == "__main__":
             garantir_sessao()
         except Exception as e_inicial:  # pylint: disable=broad-exception-caught
             logger.error(
-                "Não foi possível efetuar o login automático inicial: %s", e_inicial
+                "Não foi possível acessar o portal de forma automatizada: %s", e_inicial
             )
 
     thread_background = threading.Thread(target=loop_reanalise_background, daemon=True)

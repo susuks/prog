@@ -16,7 +16,7 @@ const MAPA_ORIGENS = {
     "1": "DuoTalk", "2": "Tráfego", "3": "Remarketing", "4": "Contato Lucas",
     "5": "Outro", "6": "Indicação", "7": "RMKT + RMKT pessoal",
     "8": "TRFG + RMKT pessoal", "9": "DT + RMKT pessoal",
-    "10": "Ctt.L + RMKT pessoal", "11": "Site"
+    "10": "Ctt.L + RMKT pessoal", "11": "Site", "12": "Contato Emanuel"
 };
 
 let NUMERO_ADMIN_CONFIG = '';
@@ -113,18 +113,29 @@ setInterval(async () => {
             const planilha = resposta.data.planilha;
             item.loadingMsg.edit(`[REGISTRADO] Contrato validado com sucesso (após retentativa).\n\nContrato: ${item.dadosVenda.contrato}\nVendedor: ${item.dadosVenda.vendedor}\nPlanilha: ${planilha}\nStatus: ${status}`);
         } catch (erroApi) {
-            if (erroApi.response && erroApi.response.status === 409) {
-                item.loadingMsg.edit(`[REGISTRADO] O contrato ${item.dadosVenda.contrato} já foi processado e gravado com sucesso no sistema.`);
-                logger.info(`Retentativa cancelada: Contrato ${item.dadosVenda.contrato} já se encontrava registrado (Erro 409).`);
-                return;
+            let msgTratada = "Falha de comunicação ou erro interno.";
+
+            if (erroApi.response && erroApi.response.data) {
+                const tipoErro = erroApi.response.data.erro;
+                msgTratada = erroApi.response.data.mensagem || msgTratada;
+
+                if (tipoErro === 'duplicidade') {
+                    item.loadingMsg.edit(`[REGISTRADO] ${msgTratada}`);
+                    logger.info(`Retentativa cancelada: Contrato ${item.dadosVenda.contrato} já se encontrava registrado.`);
+                    return; 
+                } else if (tipoErro === 'planilha_ausente') {
+                    item.loadingMsg.edit(`[ERRO DE SISTEMA] Falha definitiva na retentativa.\n\n${msgTratada}\n\nO bot não tentará novamente até que as planilhas sejam criadas.`);
+                    logger.error(`Retentativa abortada por falha de infraestrutura.`);
+                    return; 
+                }
             }
 
             item.tentativas += 1;
             if (item.tentativas < 3) {
                 filaRetentativas.push(item);
-                logger.warn(`Falha na retentativa ${item.dadosVenda.contrato}. Devolvido para a fila.`);
+                logger.warn(`Falha na retentativa ${item.dadosVenda.contrato}. Devolvido para a fila. Detalhe: ${msgTratada}`);
             } else {
-                item.loadingMsg.edit(`[ERRO] Falha definitiva ao processar contrato após múltiplas tentativas.\n\nContrato: ${item.dadosVenda.contrato}`);
+                item.loadingMsg.edit(`[ERRO] Falha definitiva ao processar contrato após 3 tentativas em background.\n\nContrato: ${item.dadosVenda.contrato}\nÚltimo Erro: ${msgTratada}`);
                 logger.error(`Abandono de retentativa para o contrato ${item.dadosVenda.contrato}.`);
             }
         }
@@ -252,23 +263,45 @@ async function processarMensagem(msg) {
                 logger.info(`Enviando Contrato: ${dadosVenda.contrato} | Vendedor: ${nomeVendedor}`);
 
                 try {
-                    const respostaPython = await axios.post(URL_API_PYTHON, dadosVenda, { 
+                    const respostaApp = await axios.post(URL_API_PYTHON, dadosVenda, { 
                         headers: { 'Authorization': `Bearer ${TOKEN_API}` },
                         timeout: 180000
                     });
-                    const status = respostaPython.data.status_pagamento;
-                    const planilha = respostaPython.data.planilha;
+                    const status = respostaApp.data.status_pagamento;
+                    const planilha = respostaApp.data.planilha;
                     
                     loadingMsg.edit(`[REGISTRADO] Contrato validado com sucesso.\n\nContrato: ${dadosVenda.contrato}\nVendedor: ${nomeVendedor}\nPlanilha: ${planilha}\nStatus: ${status}`);
 
                 } catch (erroApi) {
-                    if (erroApi.response && erroApi.response.status === 409) {
-                        loadingMsg.edit(`[REGISTRADO] O contrato ${dadosVenda.contrato} já foi processado e gravado com sucesso no sistema.`);
-                        logger.info(`Contrato ${dadosVenda.contrato} já se encontrava registrado (Erro 409). Transferência para fila de resiliência ignorada.`);
+                    // Verificação estrita da resposta da API
+                    if (erroApi.response && erroApi.response.data) {
+                        const tipoErro = erroApi.response.data.erro;
+                        const msgErro = erroApi.response.data.mensagem || 'Erro desconhecido retornado pela API.';
+
+                        if (tipoErro === 'duplicidade') {
+                            loadingMsg.edit(`[REGISTRADO] ${msgErro}`);
+                            logger.info(`Contrato ${dadosVenda.contrato} ignorado na fila. Motivo: Duplicidade (409).`);
+                        
+                        } else if (tipoErro === 'planilha_ausente') {
+                            loadingMsg.edit(`[ERRO DE SISTEMA] ${msgErro}\n\nCrie as planilhas ou abas ausentes e reenvie a mensagem para tentar novamente.`);
+                            logger.error(`Falha de infraestrutura no contrato ${dadosVenda.contrato}.`);
+                        
+                        } else if (tipoErro === 'contrato_nao_encontrado') {
+                            logger.warn(`Contrato ${dadosVenda.contrato} não encontrado no portal. Transferindo para fila de resiliência.`);
+                            filaRetentativas.push({ dadosVenda, loadingMsg, tentativas: 0 });
+                            loadingMsg.edit(`[AVISO] ${msgErro}\n\nO bot tentará encontrar o contrato novamente em background (esperando o portal atualizar).`);
+                        
+                        } else {
+                            // Cobre 'falha_gravacao' ou 'erro_interno'
+                            logger.error(`Falha no contrato ${dadosVenda.contrato} (${tipoErro}). Transferindo para resiliência.`);
+                            filaRetentativas.push({ dadosVenda, loadingMsg, tentativas: 0 });
+                            loadingMsg.edit(`[AVISO] Lentidão ou falha de gravação detectada.\nDetalhe: ${msgErro}\n\nO bot transferiu o contrato para a fila de retentativas.`);
+                        }
                     } else {
-                        logger.error(`Falha inicial no contrato ${dadosVenda.contrato}. Transferindo para fila de resiliência.`);
+                        // Trata quedas de rede onde o Node sequer consegue falar com o Python
+                        logger.error(`Falha de comunicação offline no contrato ${dadosVenda.contrato}. Transferindo para fila de resiliência.`);
                         filaRetentativas.push({ dadosVenda, loadingMsg, tentativas: 0 });
-                        loadingMsg.edit(`[AVISO] Falha de comunicação ou lentidão no sistema. O bot tentará registrar o contrato ${dadosVenda.contrato} novamente em background.`);
+                        loadingMsg.edit(`[AVISO] Falha de comunicação com o motor Python. O bot tentará registrar o contrato ${dadosVenda.contrato} novamente em background.`);
                     }
                 }
 
@@ -286,7 +319,7 @@ client.on('qr', (qr) => qrcode.generate(qr, { small: true }));
 client.on('ready', async () => {
     if (sistemaIniciado) return;
     sistemaIniciado = true;
-    logger.info('>>> MONITOR V13.0 (TIMEOUT ALARGADO E LEITURA DE DUPLICIDADE) INICIADO <<<');
+    logger.info('>>> MONITOR V14.0 (MAPEAMENTO DE ERROS EXPLÍCITO) INICIADO <<<');
     carregarMemorias();
 });
 
