@@ -19,6 +19,7 @@ files/config.txt
 files/vendedores.csv
 files/vendedores enc.csv
 files/historico_concluidos.csv
+files/*.html
 
 
 # Arquivos do sistema

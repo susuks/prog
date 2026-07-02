@@ -27,15 +27,24 @@ from gerador_dados import (
     salvar_pendentes,
     salvar_historico_concluido,
     verificar_contrato_registrado,
+    carregar_adimplencia,
+    salvar_adimplencia,
+    migrar_para_adimplencia,
+    buscar_status_offline_regex,
+    registrar_adimplencia_planilhas,
+    registrar_apenas_situacao_cliente,
+    CONFIG,
 )
 
 from motor_navegacao import (
     iniciar_navegador,
     buscar_contrato,
     extrair_dados_completos,
-    verificar_apenas_pagamento,
     manter_sessao_viva,
     fazer_login_com_ia,
+    buscar_contrato_avancado,
+    raspar_dados_adimplencia,
+    baixar_relatorios_cache,
 )
 
 # ============================================================================
@@ -67,26 +76,28 @@ driver_global = None
 navegador_lock = threading.Lock()
 TOKEN_API_ESPERADO = "Bearer CHAVE_SECRETA_ENTERPRISE_V6"
 
-ESTADO = {"autenticado": False, "ultimo_keep_alive": time.time(), "ultimo_login": 0}
+ESTADO = {
+    "autenticado": False,
+    "ultimo_keep_alive": time.time(),
+    "ultimo_login": 0,
+    "ultima_sincronizacao": 0,
+    "ultima_sincronizacao_diaria": 0,
+}
 
 
 def garantir_sessao():
-    """
-    Verifica a integridade da sessão web e garante o ciclo de 4 horas.
-    Caso o portal esteja desconectado ou o tempo tenha expirado, aciona a
-    rotina de Inteligência Artificial para efetuar um novo login na página inicial.
-    """
+    """Garante o acesso e efetua login preventivo após 4 horas de ciclo."""
     agora = time.time()
     precisa_relogin = (agora - ESTADO.get("ultimo_login", 0)) > 14400
 
     if not ESTADO["autenticado"] or precisa_relogin:
         if precisa_relogin and ESTADO["autenticado"]:
             logger.info(
-                "[SISTEMA] Ciclo de 4 horas atingido. Executando re-login por segurança."
+                "[SISTEMA] Ciclo de 4 horas atingido. Executando re-login preventivo."
             )
 
         if fazer_login_com_ia(driver_global):
-            logger.info("[LIBERADO] Acesso restabelecido via Inteligência Artificial.")
+            logger.info("[LIBERADO] Acesso restabelecido via IA.")
             ESTADO["autenticado"] = True
             ESTADO["ultimo_keep_alive"] = agora
             ESTADO["ultimo_login"] = agora
@@ -100,10 +111,7 @@ def garantir_sessao():
 # ============================================================================
 @app.route("/processar_venda", methods=["POST"])
 def processar_venda():
-    """
-    Endpoint HTTP POST. Realiza a validação do Bearer Token, previne a
-    duplicidade de contratos e comanda o motor Selenium.
-    """
+    """Endpoint HTTP POST. Valida o Bearer Token e cadastra a venda no sistema."""
     auth_header = request.headers.get("Authorization")
     if auth_header != TOKEN_API_ESPERADO:
         logger.warning("Tentativa de acesso não autorizada. Token: %s", auth_header)
@@ -131,16 +139,13 @@ def processar_venda():
 
     logger.info("API RECEBIDA | Contrato: %s | Vendedor: %s", contrato, vendedor)
 
-    # Verificação de duplicidade com envio de mensagem explícita
     if verificar_contrato_registrado(contrato):
-        logger.info(
-            "RECUSADO | O contrato %s já consta no sistema (Duplicidade).", contrato
-        )
+        logger.info("RECUSADO | O contrato %s já consta no sistema.", contrato)
         return (
             jsonify(
                 {
                     "erro": "duplicidade",
-                    "mensagem": f"O contrato {contrato} já foi processado e gravado anteriormente no sistema.",
+                    "mensagem": f"O contrato {contrato} já foi processado e gravado.",
                 }
             ),
             409,
@@ -152,38 +157,35 @@ def processar_venda():
             nome_planilha_geral = f"{PREFIXO_PLANILHA}GERAL"
             aba_atual = obter_mes_utc4()
 
-            # Tentativa de conexão com todas as planilhas e abas alvo
             sheet_vend = conectar_google_sheets(nome_planilha_vendedor, aba_atual)
             sheet_geral_ano = conectar_google_sheets(
                 nome_planilha_geral, NOME_ABA_GERAL
             )
             sheet_geral_mes = conectar_google_sheets(nome_planilha_geral, aba_atual)
 
-            # Verificação estrita de infraestrutura das planilhas (Verifica se encontrou tudo)
             erros_infra = []
             if not sheet_vend:
-                erros_infra.append(
-                    f"Planilha do Vendedor ({nome_planilha_vendedor}) -> Aba: {aba_atual}"
-                )
+                erros_infra.append(f"Planilha Vendedor ({nome_planilha_vendedor})")
             if not sheet_geral_ano:
                 erros_infra.append(f"Planilha GERAL -> Aba: {NOME_ABA_GERAL}")
             if not sheet_geral_mes:
                 erros_infra.append(f"Planilha GERAL -> Aba: {aba_atual}")
 
             if erros_infra:
-                msg_erro = f"Infraestrutura inválida. Não foi possível localizar: {', '.join(erros_infra)}."
+                msg_erro = (
+                    "Infraestrutura inválida. Não foi possível localizar: "
+                    f"{', '.join(erros_infra)}."
+                )
                 logger.error("[ERRO INFRAESTRUTURA] %s", msg_erro)
                 return jsonify({"erro": "planilha_ausente", "mensagem": msg_erro}), 404
 
             garantir_sessao()
             ESTADO["ultimo_keep_alive"] = time.time()
 
-            # Lógica de Busca com Contingência Única
             encontrou_contrato = buscar_contrato(driver_global, contrato)
             if not encontrou_contrato:
                 logger.warning(
-                    "Contrato %s não localizado. Acionando contingência de re-login na API...",
-                    contrato,
+                    "Contrato %s não localizado. Acionando re-login...", contrato
                 )
                 ESTADO["autenticado"] = False
                 garantir_sessao()
@@ -191,43 +193,32 @@ def processar_venda():
 
             if encontrou_contrato:
                 dados_site = extrair_dados_completos(driver_global)
-
                 anotou_vend = False
                 anotou_geral_ano = False
                 anotou_geral_mes = False
 
-                # Execução das gravações físicas com monitoramento individual
                 try:
                     atualizar_planilha_vendedor(sheet_vend, dados, dados_site, contrato)
                     anotou_vend = True
                 except Exception as e_vend:  # pylint: disable=broad-exception-caught
-                    logger.error(
-                        "Falha na gravação da planilha do vendedor: %s", e_vend
-                    )
+                    logger.error("Falha na gravação do vendedor: %s", e_vend)
 
                 try:
                     atualizar_planilha_geral(
                         sheet_geral_ano, dados, dados_site, contrato
                     )
                     anotou_geral_ano = True
-                except Exception as e_geral_ano:  # pylint: disable=broad-exception-caught
-                    logger.error(
-                        "Falha na gravação da planilha GERAL (Aba Anual): %s",
-                        e_geral_ano,
-                    )
+                except Exception as e_gano:  # pylint: disable=broad-exception-caught
+                    logger.error("Falha na gravação GERAL Anual: %s", e_gano)
 
                 try:
                     atualizar_planilha_geral(
                         sheet_geral_mes, dados, dados_site, contrato
                     )
                     anotou_geral_mes = True
-                except Exception as e_geral_mes:  # pylint: disable=broad-exception-caught
-                    logger.error(
-                        "Falha na gravação da planilha GERAL (Aba Mensal): %s",
-                        e_geral_mes,
-                    )
+                except Exception as e_gmes:  # pylint: disable=broad-exception-caught
+                    logger.error("Falha na gravação GERAL Mensal: %s", e_gmes)
 
-                # Condição de Sucesso Estrito: Exige sucesso em 100% dos alvos
                 if anotou_vend and anotou_geral_ano and anotou_geral_mes:
                     texto_st = (
                         "1º Parcela Paga"
@@ -242,11 +233,7 @@ def processar_venda():
                         telefone_vendedor,
                         texto_st,
                     )
-
-                    logger.info(
-                        "[SUCESSO API] Contrato %s gravado com sucesso em todas as planilhas e abas.",
-                        contrato,
-                    )
+                    logger.info("[SUCESSO API] Contrato %s gravado.", contrato)
 
                     if not dados_site.get("pago"):
                         adicionar_para_reanalise(
@@ -258,9 +245,17 @@ def processar_venda():
                             dados,
                             aba_atual,
                         )
-                        logger.info(
-                            "   -> Contrato %s inserido na fila de reanálise de 30 dias.",
+                    else:
+                        info_migracao = {
+                            "vendedor_nome": vendedor,
+                            "nome_planilha": nome_planilha_vendedor,
+                            "aba_original": aba_atual,
+                        }
+                        migrar_para_adimplencia(
                             contrato,
+                            info_migracao,
+                            dados_site.get("grupo", ""),
+                            dados_site.get("cota", ""),
                         )
 
                     return (
@@ -274,44 +269,39 @@ def processar_venda():
                         200,
                     )
 
-                else:
-                    # Relatório de falhas físicas durante a escrita
-                    erros_gravacao = []
-                    if not anotou_vend:
-                        erros_gravacao.append("Planilha do Vendedor")
-                    if not anotou_geral_ano:
-                        erros_gravacao.append("Planilha GERAL (Aba Anual)")
-                    if not anotou_geral_mes:
-                        erros_gravacao.append("Planilha GERAL (Aba Mensal)")
+                erros_gravacao = []
+                if not anotou_vend:
+                    erros_gravacao.append("Planilha do Vendedor")
+                if not anotou_geral_ano:
+                    erros_gravacao.append("Planilha GERAL Anual")
+                if not anotou_geral_mes:
+                    erros_gravacao.append("Planilha GERAL Mensal")
 
-                    msg_falha = f"Falha na gravação física dos dados. Erro ao atualizar: {', '.join(erros_gravacao)}."
-                    logger.error("[ERRO GRAVAÇÃO] %s", msg_falha)
-                    return (
-                        jsonify({"erro": "falha_gravacao", "mensagem": msg_falha}),
-                        500,
-                    )
+                msg_falha = (
+                    "Falha na gravação física. Erro ao atualizar: "
+                    f"{', '.join(erros_gravacao)}."
+                )
+                logger.error("[ERRO GRAVAÇÃO] %s", msg_falha)
+                return jsonify({"erro": "falha_gravacao", "mensagem": msg_falha}), 500
 
-            logger.error(
-                "API RECUSADA | Contrato %s definitivamente não localizado após contingência.",
-                contrato,
-            )
+            logger.error("API RECUSADA | Contrato %s não localizado.", contrato)
             return (
                 jsonify(
                     {
                         "erro": "contrato_nao_encontrado",
-                        "mensagem": f"O contrato {contrato} não foi localizado no portal Autocred.",
+                        "mensagem": f"O contrato {contrato} não foi localizado.",
                     }
                 ),
                 404,
             )
 
         except Exception as e_motor:  # pylint: disable=broad-exception-caught
-            logger.error("Erro interno do motor de execução: %s", str(e_motor))
+            logger.error("Erro interno do motor: %s", e_motor)
             return (
                 jsonify(
                     {
                         "erro": "erro_interno",
-                        "mensagem": f"Erro interno no motor Python: {str(e_motor)}",
+                        "mensagem": f"Erro interno no motor Python: {e_motor}",
                     }
                 ),
                 500,
@@ -322,26 +312,17 @@ def processar_venda():
 # ROTINA DE BACKGROUND (REANÁLISE DE 1 HORA / 30 DIAS)
 # ============================================================================
 def loop_reanalise_background():
-    """
-    Rotina em segundo plano. Varre o arquivo de pendentes a cada 1 hora.
-    Se o contrato não for pago em 30 dias, ele é removido da fila.
-    """
+    """Varre a fila de 1ª parcela, mantendo a sessão viva em ociosidade."""
     logger.info("Motor de Reanálise Independente Iniciado.")
 
     while True:
         time.sleep(60)
 
-        with navegador_lock:
-            try:
-                pendentes = carregar_pendentes()
-                mudou_pendentes = False
+        try:
+            pendentes = carregar_pendentes()
+            mudou_pendentes = False
 
-                if pendentes and not ESTADO["autenticado"]:
-                    try:
-                        garantir_sessao()
-                    except Exception:  # pylint: disable=broad-exception-caught
-                        continue
-
+            if pendentes:
                 for contrato, info in list(pendentes.items()):
                     agora = time.time()
                     ultima_verificacao = info.get("ultima_verificacao", 0)
@@ -352,10 +333,7 @@ def loop_reanalise_background():
                         mudou_pendentes = True
 
                     if agora - data_inclusao > 2592000:
-                        logger.warning(
-                            "EXPIROU | Contrato %s atingiu o prazo máximo de 30 dias sem pagamento. Removido.",
-                            contrato,
-                        )
+                        logger.warning("EXPIROU | Contrato %s removido.", contrato)
                         del pendentes[contrato]
                         mudou_pendentes = True
                         continue
@@ -363,124 +341,389 @@ def loop_reanalise_background():
                     if agora - ultima_verificacao < 3600:
                         continue
 
-                    ESTADO["ultimo_keep_alive"] = agora
-                    info["tentativas"] = info.get("tentativas", 0) + 1
-                    info["ultima_verificacao"] = agora
-                    mudou_pendentes = True
+                    with navegador_lock:
+                        if not ESTADO["autenticado"]:
+                            try:
+                                garantir_sessao()
+                            except Exception:  # pylint: disable=broad-exception-caught
+                                continue
 
-                    logger.info("REANÁLISE | Verificando %s...", contrato)
+                        ESTADO["ultimo_keep_alive"] = time.time()
+                        info["tentativas"] = info.get("tentativas", 0) + 1
+                        info["ultima_verificacao"] = time.time()
+                        mudou_pendentes = True
 
-                    encontrou_contrato = buscar_contrato(driver_global, contrato)
-                    if not encontrou_contrato:
-                        logger.warning(
-                            "Contrato %s não encontrado na reanálise. Acionando contingência de re-login...",
-                            contrato,
-                        )
-                        ESTADO["autenticado"] = False
-                        garantir_sessao()
-                        encontrou_contrato = buscar_contrato(driver_global, contrato)
+                        logger.info("REANÁLISE | Verificando %s...", contrato)
 
-                    if encontrou_contrato:
-                        if verificar_apenas_pagamento(driver_global):
-                            logger.info(
-                                "PAGAMENTO DETECTADO | Atualizando status do contrato %s.",
-                                contrato,
-                            )
+                        try:
+                            encontrou = buscar_contrato(driver_global, contrato)
 
-                            anotou_v = False
-                            anotou_g_ano = False
-                            anotou_g_mes = False
+                            if encontrou:
+                                dados_completos = extrair_dados_completos(driver_global)
 
-                            aba_salva = info.get("aba_original", obter_mes_utc4())
+                                if dados_completos.get("pago"):
+                                    logger.info(
+                                        "PAGAMENTO DETECTADO | Contrato %s.", contrato
+                                    )
+                                    anotou_v = False
+                                    anotou_g_ano = False
+                                    anotou_g_mes = False
+                                    aba_salva = info.get(
+                                        "aba_original", obter_mes_utc4()
+                                    )
 
-                            sheet_v = conectar_google_sheets(
-                                info["nome_planilha"], aba_salva
-                            )
-                            sheet_g_ano = conectar_google_sheets(
-                                f"{PREFIXO_PLANILHA}GERAL", NOME_ABA_GERAL
-                            )
-                            sheet_g_mes = conectar_google_sheets(
-                                f"{PREFIXO_PLANILHA}GERAL", aba_salva
-                            )
+                                    sheet_v = conectar_google_sheets(
+                                        info["nome_planilha"], aba_salva
+                                    )
+                                    sheet_g_ano = conectar_google_sheets(
+                                        f"{PREFIXO_PLANILHA}GERAL", NOME_ABA_GERAL
+                                    )
+                                    sheet_g_mes = conectar_google_sheets(
+                                        f"{PREFIXO_PLANILHA}GERAL", aba_salva
+                                    )
 
-                            # Na reanálise, também exigimos a presença de toda a estrutura antes de atualizar
-                            if sheet_v and sheet_g_ano and sheet_g_mes:
-                                l_v = encontrar_linha_do_contrato(
-                                    sheet_v, contrato, col_idx=13
-                                )
-                                l_g_ano = encontrar_linha_do_contrato(
-                                    sheet_g_ano, contrato, col_idx=12
-                                )
-                                l_g_mes = encontrar_linha_do_contrato(
-                                    sheet_g_mes, contrato, col_idx=12
-                                )
-
-                                if l_v and l_g_ano and l_g_mes:
-                                    try:
-                                        sheet_v.update_cell(l_v, 2, "1º Parcela Paga")
-                                        anotou_v = True
-                                    except Exception:  # pylint: disable=broad-exception-caught
-                                        pass
-
-                                    try:
-                                        sheet_g_ano.update_cell(
-                                            l_g_ano, 1, "1º Parcela Paga"
+                                    if sheet_v and sheet_g_ano and sheet_g_mes:
+                                        l_v = encontrar_linha_do_contrato(
+                                            sheet_v, contrato, 13
                                         )
-                                        anotou_g_ano = True
-                                    except Exception:  # pylint: disable=broad-exception-caught
-                                        pass
-
-                                    try:
-                                        sheet_g_mes.update_cell(
-                                            l_g_mes, 1, "1º Parcela Paga"
+                                        l_g_ano = encontrar_linha_do_contrato(
+                                            sheet_g_ano, contrato, 12
                                         )
-                                        anotou_g_mes = True
-                                    except Exception:  # pylint: disable=broad-exception-caught
-                                        pass
-
-                                    if anotou_v and anotou_g_ano and anotou_g_mes:
-                                        salvar_historico_concluido(
-                                            contrato,
-                                            info["nome_planilha"],
-                                            info["vendedor_nome"],
-                                            info["vendedor_tel"],
-                                            "1º Parcela Paga (Reanálise)",
+                                        l_g_mes = encontrar_linha_do_contrato(
+                                            sheet_g_mes, contrato, 12
                                         )
-                                        del pendentes[contrato]
+
+                                        if l_v and l_g_ano and l_g_mes:
+                                            try:
+                                                sheet_v.update_cell(
+                                                    l_v, 2, "1º Parcela Paga"
+                                                )
+                                                anotou_v = True
+                                            except (
+                                                Exception  # pylint: disable=broad-exception-caught
+                                            ):
+                                                pass
+
+                                            try:
+                                                sheet_g_ano.update_cell(
+                                                    l_g_ano, 1, "1º Parcela Paga"
+                                                )
+                                                anotou_g_ano = True
+                                            except (
+                                                Exception  # pylint: disable=broad-exception-caught
+                                            ):
+                                                pass
+
+                                            try:
+                                                sheet_g_mes.update_cell(
+                                                    l_g_mes, 1, "1º Parcela Paga"
+                                                )
+                                                anotou_g_mes = True
+                                            except (
+                                                Exception  # pylint: disable=broad-exception-caught
+                                            ):
+                                                pass
+
+                                            if (
+                                                anotou_v
+                                                and anotou_g_ano
+                                                and anotou_g_mes
+                                            ):
+                                                salvar_historico_concluido(
+                                                    contrato,
+                                                    info["nome_planilha"],
+                                                    info["vendedor_nome"],
+                                                    info["vendedor_tel"],
+                                                    "1º Parcela Paga",
+                                                )
+                                                migrar_para_adimplencia(
+                                                    contrato,
+                                                    info,
+                                                    dados_completos.get("grupo", ""),
+                                                    dados_completos.get("cota", ""),
+                                                )
+                                                del pendentes[contrato]
+                                    else:
+                                        logger.critical(
+                                            "[CRÍTICO] Planilhas corrompidas."
+                                        )
                             else:
-                                logger.critical(
-                                    "[CRÍTICO REANÁLISE] Estrutura de planilhas corrompida para o contrato %s no background.",
-                                    contrato,
+                                logger.warning(
+                                    "NÃO ENCONTRADO | Cota %s indisponível.", contrato
                                 )
-                    else:
-                        logger.warning(
-                            "NÃO ENCONTRADO | Cota %s definitivamente indisponível após contingência. Removida da fila.",
-                            contrato,
-                        )
-                        del pendentes[contrato]
 
-                if mudou_pendentes:
-                    salvar_pendentes(pendentes)
+                        except (
+                            Exception  # pylint: disable=broad-exception-caught
+                        ) as e_indiv:
+                            logger.error(
+                                "Erro ao verificar pendente %s: %s", contrato, e_indiv
+                            )
 
+            if mudou_pendentes:
+                salvar_pendentes(pendentes)
+
+            # Keep-Alive isolado, rodando independente da fila
+            with navegador_lock:
                 if ESTADO["autenticado"]:
                     tempo_inativo = time.time() - ESTADO["ultimo_keep_alive"]
                     if tempo_inativo > TEMPO_INATIVIDADE_MAXIMO:
                         if not manter_sessao_viva(driver_global):
-                            logger.warning(
-                                "Keep-Alive falhou. Necessário Relogin futuro."
-                            )
                             ESTADO["autenticado"] = False
                         ESTADO["ultimo_keep_alive"] = time.time()
 
-            except Exception as e_bg:  # pylint: disable=broad-exception-caught
-                logger.error("Erro no loop de background protegido: %s", str(e_bg))
+        except Exception as e_bg:  # pylint: disable=broad-exception-caught
+            logger.error("Erro no loop de background protegido: %s", e_bg)
+
+
+# ============================================================================
+# NOVA THREAD: CRM DE ADIMPLÊNCIA (COM DOWNLOAD SINCRONIZADO E OTIMIZADO)
+# ============================================================================
+def loop_reanalise_adimplencia():
+    """CRM de longo prazo com sincronização diária profunda e frequente rápida."""
+    logger.info("Motor de CRM (Gestão de Adimplência) Iniciado.")
+    while True:
+        time.sleep(CONFIG.get("INTERVALO_REANALISE_ADIMPLENCIA", 14400))
+
+        agora = time.time()
+        intervalo_sinc = CONFIG.get("INTERVALO_SINC_RELATORIOS", 3600)
+
+        if agora - ESTADO.get("ultima_sincronizacao_diaria", 0) >= 86400:
+            with navegador_lock:
+                if not ESTADO["autenticado"]:
+                    try:
+                        garantir_sessao()
+                    except Exception:  # pylint: disable=broad-exception-caught
+                        pass
+                if ESTADO["autenticado"]:
+                    baixar_relatorios_cache(driver_global, tipo="diario")
+                    ESTADO["ultima_sincronizacao_diaria"] = time.time()
+                    ESTADO["ultima_sincronizacao"] = time.time()
+
+        elif agora - ESTADO.get("ultima_sincronizacao", 0) >= intervalo_sinc:
+            with navegador_lock:
+                if not ESTADO["autenticado"]:
+                    try:
+                        garantir_sessao()
+                    except Exception:  # pylint: disable=broad-exception-caught
+                        pass
+                if ESTADO["autenticado"]:
+                    baixar_relatorios_cache(driver_global, tipo="frequente")
+                    ESTADO["ultima_sincronizacao"] = time.time()
+
+        adimplencia = carregar_adimplencia()
+        mudou = False
+
+        for contrato, info in list(adimplencia.items()):
+
+            # =========================================================================
+            # OTIMIZAÇÃO ESTRUTURAL E REATIVAÇÃO (Parsing Offline)
+            # =========================================================================
+
+            status_off_rapido = buscar_status_offline_regex(
+                info.get("grupo"), info.get("cota"), info.get("cota_versao")
+            )
+
+            if status_off_rapido:
+                if info.get("monitorar", True) is not False:
+                    logger.info(
+                        "[CRM] Morte Confirmada: Contrato %s consta como %s offline.",
+                        contrato,
+                        status_off_rapido,
+                    )
+
+                    sheet_v = conectar_google_sheets(
+                        info["nome_planilha"], info["aba_original"]
+                    )
+                    sheet_g_ano = conectar_google_sheets(
+                        f"{PREFIXO_PLANILHA}GERAL", NOME_ABA_GERAL
+                    )
+                    sheet_g_mes = conectar_google_sheets(
+                        f"{PREFIXO_PLANILHA}GERAL", info["aba_original"]
+                    )
+
+                    if sheet_v and sheet_g_ano and sheet_g_mes:
+                        registrar_adimplencia_planilhas(
+                            sheet_v,
+                            contrato,
+                            "CANCELADO/DESIST",
+                            0,
+                            status_off_rapido,
+                            13,
+                        )
+                        registrar_adimplencia_planilhas(
+                            sheet_g_ano,
+                            contrato,
+                            "CANCELADO/DESIST",
+                            0,
+                            status_off_rapido,
+                            12,
+                        )
+                        registrar_adimplencia_planilhas(
+                            sheet_g_mes,
+                            contrato,
+                            "CANCELADO/DESIST",
+                            0,
+                            status_off_rapido,
+                            12,
+                        )
+                        info["monitorar"] = False
+                        mudou = True
+
+                continue
+
+            # =========================================================================
+
+            if not info.get("monitorar", True):
+                logger.info(
+                    "[CRM] Ressurreição Detectada: Contrato %s não consta mais "
+                    "nos cancelamentos. Reativando rastreio.",
+                    contrato,
+                )
+                info["monitorar"] = True
+                mudou = True
+
+            with navegador_lock:
+                try:
+                    if not ESTADO["autenticado"]:
+                        garantir_sessao()
+
+                    logger.info(
+                        "[CRM] Verificando Adimplência ao vivo: %s...", contrato
+                    )
+                    ESTADO["ultimo_keep_alive"] = time.time()
+
+                    encontrou, motivo, cota_versao_site = buscar_contrato_avancado(
+                        driver_global, contrato
+                    )
+
+                    if encontrou:
+                        if cota_versao_site:
+                            info["cota_versao"] = cota_versao_site
+
+                        info["data_limbo"] = None
+                        mudou = True
+
+                        dados_adim = raspar_dados_adimplencia(driver_global)
+
+                        sheet_v = conectar_google_sheets(
+                            info["nome_planilha"], info["aba_original"]
+                        )
+                        sheet_g_ano = conectar_google_sheets(
+                            f"{PREFIXO_PLANILHA}GERAL", NOME_ABA_GERAL
+                        )
+                        sheet_g_mes = conectar_google_sheets(
+                            f"{PREFIXO_PLANILHA}GERAL", info["aba_original"]
+                        )
+
+                        if sheet_v and sheet_g_ano and sheet_g_mes:
+                            registrar_adimplencia_planilhas(
+                                sheet_v,
+                                contrato,
+                                dados_adim["status_pagamento"],
+                                dados_adim["parcelas_pagas"],
+                                "Ativo",
+                                13,
+                            )
+                            registrar_adimplencia_planilhas(
+                                sheet_g_ano,
+                                contrato,
+                                dados_adim["status_pagamento"],
+                                dados_adim["parcelas_pagas"],
+                                "Ativo",
+                                12,
+                            )
+                            registrar_adimplencia_planilhas(
+                                sheet_g_mes,
+                                contrato,
+                                dados_adim["status_pagamento"],
+                                dados_adim["parcelas_pagas"],
+                                "Ativo",
+                                12,
+                            )
+
+                    else:
+                        if motivo == "SESSAO_CAIU":
+                            logger.error(
+                                "[SISTEMA] Queda de conexão detectada ao vivo pela rede. "
+                                "Interrompendo a cascata de limbos falsos."
+                            )
+                            ESTADO["autenticado"] = False
+                            continue
+
+                        elif motivo == "NAO_ENCONTRADO":
+                            if not info.get("data_limbo"):
+                                info["data_limbo"] = time.time()
+                                logger.warning(
+                                    "[CRM] %s entrou no Limbo (Inacessível, "
+                                    "mas não oficializado).",
+                                    contrato,
+                                )
+                                mudou = True
+
+                                sheet_v = conectar_google_sheets(
+                                    info["nome_planilha"], info["aba_original"]
+                                )
+                                sheet_g_ano = conectar_google_sheets(
+                                    f"{PREFIXO_PLANILHA}GERAL", NOME_ABA_GERAL
+                                )
+                                sheet_g_mes = conectar_google_sheets(
+                                    f"{PREFIXO_PLANILHA}GERAL", info["aba_original"]
+                                )
+
+                                if sheet_v and sheet_g_ano and sheet_g_mes:
+                                    registrar_apenas_situacao_cliente(
+                                        sheet_v, contrato, "Inacessível", 13
+                                    )
+                                    registrar_apenas_situacao_cliente(
+                                        sheet_g_ano, contrato, "Inacessível", 12
+                                    )
+                                    registrar_apenas_situacao_cliente(
+                                        sheet_g_mes, contrato, "Inacessível", 12
+                                    )
+                            else:
+                                dias = (time.time() - info["data_limbo"]) / 86400
+                                limite = CONFIG.get("LIMITE_DIAS_DESATIVACAO", 45)
+                                if dias > limite:
+                                    logger.error(
+                                        "[CRM] Contrato %s expirou no Limbo.", contrato
+                                    )
+                                    info["monitorar"] = False
+                                    mudou = True
+
+                                    sheet_v = conectar_google_sheets(
+                                        info["nome_planilha"], info["aba_original"]
+                                    )
+                                    sheet_g_ano = conectar_google_sheets(
+                                        f"{PREFIXO_PLANILHA}GERAL", NOME_ABA_GERAL
+                                    )
+                                    sheet_g_mes = conectar_google_sheets(
+                                        f"{PREFIXO_PLANILHA}GERAL", info["aba_original"]
+                                    )
+
+                                    if sheet_v and sheet_g_ano and sheet_g_mes:
+                                        registrar_apenas_situacao_cliente(
+                                            sheet_v, contrato, "Inacessível", 13
+                                        )
+                                        registrar_apenas_situacao_cliente(
+                                            sheet_g_ano, contrato, "Inacessível", 12
+                                        )
+                                        registrar_apenas_situacao_cliente(
+                                            sheet_g_mes, contrato, "Inacessível", 12
+                                        )
+                except Exception as e_indiv:  # pylint: disable=broad-exception-caught
+                    logger.error(
+                        "[CRM] Erro ao verificar contrato %s: %s", contrato, e_indiv
+                    )
+
+        if mudou:
+            salvar_adimplencia(adimplencia)
 
 
 # ============================================================================
 # PONTO DE ENTRADA DA APLICAÇÃO (SERVIDOR WSGI PRODUCTION)
 # ============================================================================
 if __name__ == "__main__":
-    logger.info(">>> INICIANDO SISTEMA ENTERPRISE V6 (WAITRESS WSGI + SELENIUM) <<<")
+    logger.info(">>> INICIANDO SISTEMA ENTERPRISE V6 (WAITRESS WSGI) <<<")
     driver_global = iniciar_navegador()
 
     logger.info("Executando login imediato na inicialização do sistema...")
@@ -488,14 +731,10 @@ if __name__ == "__main__":
         try:
             garantir_sessao()
         except Exception as e_inicial:  # pylint: disable=broad-exception-caught
-            logger.error(
-                "Não foi possível acessar o portal de forma automatizada: %s", e_inicial
-            )
+            logger.error("Não foi possível efetuar o login inicial: %s", e_inicial)
 
-    thread_background = threading.Thread(target=loop_reanalise_background, daemon=True)
-    thread_background.start()
+    threading.Thread(target=loop_reanalise_background, daemon=True).start()
+    threading.Thread(target=loop_reanalise_adimplencia, daemon=True).start()
 
-    logger.info(
-        "Servidor WSGI de produção (Waitress) iniciado com sucesso na porta 5000."
-    )
+    logger.info("Servidor WSGI (Waitress) iniciado na porta 5000.")
     serve(app, host="0.0.0.0", port=5000)
