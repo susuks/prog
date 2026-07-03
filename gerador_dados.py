@@ -1,9 +1,9 @@
 """
 Módulo Gerenciador de Dados e Arquivos.
 
-Responsável por centralizar toda a manipulação de dados estáticos, configurações
+Responsável por centralizar a manipulação de dados estáticos, configurações
 de ambiente, formatação de textos (Regex), operações de Entrada/Saída (I/O) em
-arquivos locais (JSON, CSV) e integração com a API do Google Sheets.
+ficheiros locais (JSON, CSV) e integração com a API do Google Sheets.
 """
 
 import os
@@ -16,7 +16,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from bs4 import BeautifulSoup
 
-logger = logging.getLogger("EnterpriseBot")
+logger = logging.getLogger("EnterpriseDados")
 
 # ============================================================================
 # CONSTANTES E CAMINHOS DE ARQUIVOS
@@ -29,16 +29,17 @@ ARQUIVO_ADIMPLENCIA = "files/adimplencia.json"
 ARQUIVO_CACHE_PLANILHAS = "files/cache_planilhas.json"
 ARQUIVO_CONFIG = "files/config.txt"
 
-# Cache Frequente (Rápido)
+# Cache Frequente e Diário (Relatórios Offline)
 CACHE_CANCELADOS = "files/cache_cancelados.html"
 CACHE_DESISTENTES = "files/cache_desistentes.html"
-
-# Cache Diário (Espera profunda de 30s - Fail-Safe)
 CACHE_CANCELADOS_DIARIO = "files/cache_cancelados_diario.html"
 CACHE_DESISTENTES_DIARIO = "files/cache_desistentes_diario.html"
 
 MAX_TENTATIVAS = 10000
 TEMPO_INATIVIDADE_MAXIMO = 300
+
+# Freio de segurança da API do Google (Reduzir para 0.0 após aumento de cota no Cloud)
+PAUSA_API_GOOGLE = 1.0
 
 
 # ============================================================================
@@ -46,7 +47,7 @@ TEMPO_INATIVIDADE_MAXIMO = 300
 # ============================================================================
 def carregar_configuracoes() -> dict:
     """
-    Lê o arquivo de configuração local (config.txt) e extrai credenciais,
+    Lê o ficheiro de configuração local (config.txt) e extrai credenciais,
     parâmetros de sistema e tempos de intervalo para as rotinas de automação.
     """
     config = {
@@ -95,10 +96,7 @@ def carregar_configuracoes() -> dict:
 
 
 def obter_mes_utc4() -> str:
-    """
-    Calcula a data e hora atual no fuso horário UTC-4 e retorna a string
-    representativa do mês correspondente em português.
-    """
+    """Calcula o fuso horário UTC-4 e retorna o mês atual em português."""
     meses_pt = {
         1: "JANEIRO",
         2: "FEVEREIRO ",
@@ -127,13 +125,10 @@ MODO_DESKTOP = CONFIG.get("MODO_DESKTOP")
 
 
 # ============================================================================
-# PROCESSAMENTO DE DADOS (REGEX) E MANIPULAÇÃO DE ARQUIVOS (JSON / CSV)
+# PROCESSAMENTO DE DADOS (REGEX) E MANIPULAÇÃO JSON/CSV
 # ============================================================================
 def limpar_inteiro(texto: str) -> int:
-    """
-    Extrai todos os dígitos numéricos de uma string fornecida e os converte
-    para um formato inteiro seguro.
-    """
+    """Extrai todos os dígitos numéricos e converte para inteiro."""
     try:
         numeros = re.sub(r"\D", "", str(texto))
         return int(numeros) if numeros else 0
@@ -142,10 +137,7 @@ def limpar_inteiro(texto: str) -> int:
 
 
 def limpar_valor(texto: str) -> float:
-    """
-    Converte uma string contendo um valor monetário no formato brasileiro
-    (ex: R$ 1.500,00) para o tipo float padrão.
-    """
+    """Converte um valor monetário no formato brasileiro para float."""
     try:
         match = re.search(r"([\d\.]+,\d{2})", str(texto))
         if match:
@@ -157,10 +149,7 @@ def limpar_valor(texto: str) -> float:
 
 
 def carregar_pendentes() -> dict:
-    """
-    Lê e retorna o conteúdo do arquivo JSON responsável por armazenar
-    os contratos que aguardam a verificação da primeira parcela.
-    """
+    """Lê o ficheiro JSON de contratos pendentes de reanálise (1ª parcela)."""
     if os.path.exists(ARQUIVO_PENDENTES):
         try:
             with open(ARQUIVO_PENDENTES, "r", encoding="utf-8") as f:
@@ -171,19 +160,13 @@ def carregar_pendentes() -> dict:
 
 
 def salvar_pendentes(dados: dict) -> None:
-    """
-    Grava o dicionário de contratos pendentes de primeira parcela
-    de volta no arquivo JSON, aplicando formatação de indentação.
-    """
+    """Grava as alterações no ficheiro JSON de contratos pendentes."""
     with open(ARQUIVO_PENDENTES, "w", encoding="utf-8") as f:
         json.dump(dados, f, indent=4)
 
 
 def verificar_contrato_registrado(contrato: str) -> bool:
-    """
-    Consulta o arquivo de histórico local e o JSON de pendentes para garantir
-    que um contrato específico não seja processado em duplicidade.
-    """
+    """Garante que um contrato não seja processado em duplicidade."""
     pendentes = carregar_pendentes()
     if str(contrato) in pendentes:
         return True
@@ -208,10 +191,7 @@ def adicionar_para_reanalise(
     dados_completos: dict,
     aba_original: str,
 ) -> None:
-    """
-    Insere um contrato recém-processado sem pagamento na fila do JSON
-    para monitoramento contínuo durante o prazo de 30 dias.
-    """
+    """Adiciona um novo contrato à fila de reanálise de primeira parcela."""
     pendentes = carregar_pendentes()
     pendentes[contrato] = {
         "vendedor_nome": vendedor_nome,
@@ -225,11 +205,6 @@ def adicionar_para_reanalise(
         "aba_original": aba_original,
     }
     salvar_pendentes(pendentes)
-    logger.info(
-        "   [AGENDADO] Contrato %s inserido na reanálise (Aba: %s).",
-        contrato,
-        aba_original,
-    )
 
 
 def salvar_historico_concluido(
@@ -239,10 +214,7 @@ def salvar_historico_concluido(
     vendedor_tel: str,
     status_pag: str,
 ) -> None:
-    """
-    Registra em um arquivo CSV local a confirmação de que um contrato
-    foi finalizado, servindo como auditoria e bloqueio de duplicatas.
-    """
+    """Regista localmente num CSV o histórico de contratos com 1ª parcela paga."""
     existe = os.path.exists(ARQUIVO_HISTORICO_SUCESSO)
     try:
         with open(ARQUIVO_HISTORICO_SUCESSO, "a", encoding="utf-8") as f:
@@ -257,6 +229,7 @@ def salvar_historico_concluido(
             safe_planilha = str(nome_planilha).replace(",", ".")
             safe_nome = str(vendedor_nome).replace(",", ".")
 
+            # Quebra de linha aplicada para respeitar o limite de 100 caracteres do PEP 8
             linha = (
                 f"{contrato},{safe_planilha},{data_hora},"
                 f"{safe_nome},{vendedor_tel},{status_pag}\n"
@@ -267,13 +240,10 @@ def salvar_historico_concluido(
 
 
 # ============================================================================
-# NOVO MÓDULO: GESTÃO DE ADIMPLÊNCIA E CACHE OFFLINE
+# MÓDULO CRM: GESTÃO DE ADIMPLÊNCIA E CACHE OFFLINE
 # ============================================================================
 def carregar_adimplencia() -> dict:
-    """
-    Carrega o arquivo JSON do módulo CRM, contendo a base de clientes
-    sujeitos a monitoramento de longo prazo (adimplência e cancelamentos).
-    """
+    """Carrega a base de clientes do CRM."""
     if os.path.exists(ARQUIVO_ADIMPLENCIA):
         try:
             with open(ARQUIVO_ADIMPLENCIA, "r", encoding="utf-8") as f:
@@ -284,18 +254,14 @@ def carregar_adimplencia() -> dict:
 
 
 def salvar_adimplencia(dados: dict) -> None:
-    """
-    Persiste o banco de dados atualizado de clientes do módulo CRM
-    no respectivo arquivo JSON.
-    """
+    """Persiste o banco de dados do CRM em disco."""
     with open(ARQUIVO_ADIMPLENCIA, "w", encoding="utf-8") as f:
         json.dump(dados, f, indent=4)
 
 
 def migrar_para_adimplencia(contrato: str, info_pendente: dict, grupo: str, cota: str):
     """
-    Transfere os dados essenciais de um cliente da fila de primeira parcela
-    para o sistema principal de CRM de longo prazo.
+    Transfere o cliente para o CRM e inicializa a infraestrutura de Cache Delta.
     """
     bd = carregar_adimplencia()
     if contrato not in bd:
@@ -309,21 +275,15 @@ def migrar_para_adimplencia(contrato: str, info_pendente: dict, grupo: str, cota
             "monitorar": True,
             "ultima_verificacao": 0,
             "data_limbo": None,
+            "ultimo_status": None,  # Delta Cache: Status Financeiro
+            "ultimas_parcelas": 0,  # Delta Cache: Pagamentos
         }
         salvar_adimplencia(bd)
-        logger.info("   [CRM] Contrato %s incluído no monitoramento.", contrato)
 
 
 def buscar_status_offline_regex(grupo: str, cota: str, cota_versao: str = None) -> str:
-    """
-    Executa o Parsing Estrutural completo (BeautifulSoup) das tabelas HTML em disco.
-    Valida a correspondência exata de Grupo, Cota e Versão (repasse) para evitar
-    falsos positivos em cotas reaproveitadas.
-    """
+    """Parsing estrutural (BeautifulSoup) para validação exata do cliente em offline."""
     if not cota_versao:
-        logger.info(
-            "   -> [Offline] Versão da cota desconhecida. Forçando busca ao vivo."
-        )
         return ""
 
     grupo_alvo = limpar_inteiro(grupo)
@@ -348,20 +308,19 @@ def buscar_status_offline_regex(grupo: str, cota: str, cota_versao: str = None) 
             try:
                 with open(arquivo, "r", encoding="utf-8", errors="ignore") as f:
                     sopa = BeautifulSoup(f.read(), "html.parser")
-
                     linhas = sopa.find_all("tr")
+
                     for linha in linhas:
                         colunas = linha.find_all("td")
-
                         if len(colunas) >= 3:
                             texto_grupo = colunas[0].get_text(strip=True)
                             texto_cota_bruto = colunas[1].get_text(strip=True)
 
                             grupo_html = limpar_inteiro(texto_grupo)
-
                             match_cota_html = re.search(
                                 r"(\d+)\s*-\s*(\d+)", texto_cota_bruto
                             )
+
                             if match_cota_html:
                                 cota_base_html = limpar_inteiro(
                                     match_cota_html.group(1)
@@ -375,20 +334,15 @@ def buscar_status_offline_regex(grupo: str, cota: str, cota_versao: str = None) 
                                     if versao_html == versao_alvo:
                                         return status
             except Exception as e:  # pylint: disable=broad-exception-caught
-                logger.error(
-                    "Falha no Parsing Estrutural do arquivo %s: %s", arquivo, e
-                )
+                logger.error("Falha no Parsing do ficheiro %s: %s", arquivo, e)
     return ""
 
 
 # ============================================================================
-# COMUNICAÇÃO COM GOOGLE SHEETS E CACHE DE IDs
+# COMUNICAÇÃO COM GOOGLE SHEETS
 # ============================================================================
 def conectar_google_sheets(nome_planilha: str, aba: str):
-    """
-    Autentica as credenciais de serviço e estabelece conexão com uma
-    planilha específica e sua respectiva aba na API do Google Sheets.
-    """
+    """Estabelece ligação à API do Google Sheets e devolve a aba requisitada."""
     scope = [
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive",
@@ -433,10 +387,7 @@ def conectar_google_sheets(nome_planilha: str, aba: str):
 
 
 def encontrar_proxima_linha_vazia(sheet, start_row: int, check_col: int) -> int:
-    """
-    Varre os valores de uma coluna designada na planilha a partir de uma
-    linha inicial para descobrir qual a próxima linha disponível para escrita.
-    """
+    """Localiza a primeira linha vazia numa coluna específica da folha."""
     coluna_alvo = sheet.col_values(check_col)
     if len(coluna_alvo) < start_row:
         return start_row
@@ -451,10 +402,7 @@ def encontrar_proxima_linha_vazia(sheet, start_row: int, check_col: int) -> int:
 
 
 def encontrar_linha_do_contrato(sheet, contrato: str, col_idx: int) -> int:
-    """
-    Pesquisa a coluna especificada no Google Sheets e retorna o índice
-    numérico da linha na qual o contrato fornecido está registrado.
-    """
+    """Localiza a linha em que um determinado contrato está registado na folha."""
     try:
         valores = sheet.col_values(col_idx)
         for i, valor in enumerate(valores, start=1):
@@ -468,10 +416,7 @@ def encontrar_linha_do_contrato(sheet, contrato: str, col_idx: int) -> int:
 def atualizar_planilha_vendedor(
     sheet, row_csv: dict, dados_site: dict, contrato: str
 ) -> str:
-    """
-    Organiza os dados extraídos do portal web e efetua a inserção do
-    registro completo na planilha individual pertencente ao vendedor.
-    """
+    """Regista os dados cadastrais e financeiros do contrato na folha do vendedor."""
     linha = encontrar_proxima_linha_vazia(sheet, start_row=12, check_col=4)
     status_pag = "1º Parcela Paga" if dados_site.get("pago") else ""
 
@@ -508,29 +453,23 @@ def atualizar_planilha_vendedor(
     ]
 
     sheet.update_cell(linha, 2, status_pag)
-
     sheet.update(
         range_name=f"D{linha}:H{linha}",
         values=[dados_cadastrais],
         value_input_option="USER_ENTERED",
     )
-
     sheet.update(
         range_name=f"J{linha}:P{linha}",
         values=[dados_financeiros],
         value_input_option="USER_ENTERED",
     )
-
     return status_pag
 
 
 def atualizar_planilha_geral(
     sheet, row_csv: dict, dados_site: dict, contrato: str
 ) -> str:
-    """
-    Organiza os dados extraídos e realiza a gravação do registro completo
-    na planilha mestre (GERAL), anexando também o CPF e o log de registro.
-    """
+    """Regista os dados completos do contrato na folha GERAL (Mensal ou Anual)."""
     linha = encontrar_proxima_linha_vazia(sheet, start_row=7, check_col=3)
     status_pag = "1º Parcela Paga" if dados_site.get("pago") else ""
 
@@ -556,7 +495,6 @@ def atualizar_planilha_geral(
 
     fuso_utc4 = timezone(timedelta(hours=-4))
     data_registro_atual = datetime.now(fuso_utc4).strftime("%d/%m/%Y")
-
     cota_planilha = str(dados_site.get("cota", "")).split("-", maxsplit=1)[0].strip()
 
     dados_financeiros = [
@@ -573,19 +511,16 @@ def atualizar_planilha_geral(
     ]
 
     sheet.update_cell(linha, 1, status_pag)
-
     sheet.update(
         range_name=f"C{linha}:G{linha}",
         values=[dados_cadastrais],
         value_input_option="USER_ENTERED",
     )
-
     sheet.update(
         range_name=f"I{linha}:R{linha}",
         values=[dados_financeiros],
         value_input_option="USER_ENTERED",
     )
-
     return status_pag
 
 
@@ -598,9 +533,7 @@ def registrar_adimplencia_planilhas(
     col_busca: int,
 ):
     """
-    Atualiza as colunas de controle financeiro a longo prazo nas extremidades
-    da planilha (Colunas S, T e U) a partir de uma linha previamente encontrada.
-    Aplica controle de taxa de requisições (Rate Limit) da API do Google.
+    Submete a atualização do cliente (Delta) nas extremidades financeiras da folha de cálculo.
     """
     linha = encontrar_linha_do_contrato(sheet, contrato, col_busca)
     if linha:
@@ -611,7 +544,7 @@ def registrar_adimplencia_planilhas(
                 values=[dados_adimplencia],
                 value_input_option="USER_ENTERED",
             )
-            time.sleep(2)
+            time.sleep(PAUSA_API_GOOGLE)
             return True
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error("Falha ao atualizar colunas no contrato %s: %s", contrato, e)
@@ -621,16 +554,12 @@ def registrar_adimplencia_planilhas(
 def registrar_apenas_situacao_cliente(
     sheet, contrato: str, status_cliente: str, col_busca: int
 ):
-    """
-    Atualiza exclusivamente a coluna U (Status do Cliente) na planilha,
-    preservando o histórico numérico e de pagamentos previamente gravado.
-    Aplica controle de taxa de requisições (Rate Limit) da API do Google.
-    """
+    """Atualiza a coluna de Situação (ex: 'Inacessível') sem alterar dados financeiros."""
     linha = encontrar_linha_do_contrato(sheet, contrato, col_busca)
     if linha:
         try:
             sheet.update_cell(linha, 21, str(status_cliente))
-            time.sleep(2)
+            time.sleep(PAUSA_API_GOOGLE)
             return True
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error("Falha ao atualizar Situação no contrato %s: %s", contrato, e)

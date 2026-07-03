@@ -34,8 +34,8 @@ from gerador_dados import (
 )
 
 logger = logging.getLogger("EnterpriseBot")
-PAUSA_HUMANA = 0.4
-PAUSA_HUMANA_LONGA = 2.0  # Freio de segurança para não sobrecarregar o servidor legado
+PAUSA_HUMANA = 0.3
+PAUSA_HUMANA_LONGA = 0.5  # Reduzido drasticamente para priorizar velocidade.
 
 
 # ============================================================================
@@ -68,14 +68,12 @@ def validar_sessao_rede(driver: webdriver.Chrome) -> bool:
     Garante o foco na raiz e faz um ping absoluto. Tolera abortos de script.
     """
     try:
-        # Garante que o Javascript seja executado na raiz do domínio, escapando de iframes
         driver.switch_to.default_content()
         script_rede = """
         var callback = arguments[arguments.length - 1];
         fetch('/autocred/LeftFrame.asp', {cache: 'no-store'})
             .then(response => {
                 if (!response.ok) {
-                    // Erro estrutural real do servidor (500, 502, 503, 404).
                     callback(false);
                     return;
                 }
@@ -93,8 +91,6 @@ def validar_sessao_rede(driver: webdriver.Chrome) -> bool:
                 }
             })
             .catch(err => {
-                // Se o navegador abortar o fetch (ex: tela piscando ou recarregando),
-                // assumimos que a sessão está viva para evitar falsos positivos instantâneos.
                 callback(true);
             });
         """
@@ -102,7 +98,6 @@ def validar_sessao_rede(driver: webdriver.Chrome) -> bool:
         status_sessao = driver.execute_async_script(script_rede)
         return status_sessao
     except Exception:  # pylint: disable=broad-exception-caught
-        # Só retorna False se o Selenium perder o controle do navegador
         return False
 
 
@@ -181,7 +176,7 @@ def buscar_contrato(driver: webdriver.Chrome, contrato: str) -> bool:
 
 
 def buscar_contrato_avancado(driver: webdriver.Chrome, contrato: str) -> tuple:
-    """Busca cega e direta. Captura a versão exata da cota na ficha do cliente."""
+    """Busca cega e direta. Trata avisos (Alerts e XPath) de forma dinâmica e cirúrgica."""
     if not validar_sessao_rede(driver):
         logger.warning("   -> [Motor] Sessão de rede caiu: %s.", contrato)
         return False, "SESSAO_CAIU", ""
@@ -226,26 +221,72 @@ def buscar_contrato_avancado(driver: webdriver.Chrome, contrato: str) -> tuple:
         btn_xpath = "//input[contains(@value, 'Localizar')]"
         driver.find_element(By.XPATH, btn_xpath).click()
 
-        try:
-            WebDriverWait(driver, 1.5).until(EC.alert_is_present())
-            alerta = driver.switch_to.alert
-            texto_alerta = alerta.text
-            alerta.accept()
-            logger.info(
-                "   -> [Motor] Alerta interceptado na busca: '%s'.", texto_alerta
-            )
-            return False, "NAO_ENCONTRADO", ""
-        except Exception:  # pylint: disable=broad-exception-caught
-            pass
-
+        # =========================================================================
+        # LAÇO DE SONDAGEM HÍBRIDA (Alertas, XPath de Erro e Tabela)
+        # =========================================================================
+        tempo_limite = time.time() + 6
         xpath_resultado = (
             f"//td/div[contains(text(), '{contrato}')] | "
             "//td[contains(@class, 'hand')]/div"
         )
-        resultado = WebDriverWait(driver, 5).until(
-            EC.element_to_be_clickable((By.XPATH, xpath_resultado))
+        # XPath fornecido pelo usuário para capturar a mensagem vermelha
+        xpath_erro_vermelho = (
+            "/html/body/form/table[1]/tbody/tr[2]/td/table/tbody/tr[12]/td/div"
         )
-        resultado.click()
+        resultado_elemento = None
+
+        while time.time() < tempo_limite:
+            # 1. Tratamento de Pop-ups nativos (Alerts)
+            try:
+                alerta = driver.switch_to.alert
+                texto_alerta = alerta.text
+                alerta.accept()
+                logger.info(
+                    "   -> [Motor] Alerta interceptado na busca: '%s'.", texto_alerta
+                )
+                return False, "NAO_ENCONTRADO", ""
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+
+            # 2. Leitura inteligente do DOM (Texto Vermelho de Inexistência)
+            try:
+                elem_erro = driver.find_element(By.XPATH, xpath_erro_vermelho)
+                texto_erro = elem_erro.text.strip().lower()
+                if texto_erro and (
+                    "inexistente" in texto_erro or "cancelado" in texto_erro
+                ):
+                    logger.info(
+                        "   -> [Motor] Aviso na tela detectado: '%s'.", elem_erro.text
+                    )
+                    return False, "NAO_ENCONTRADO", ""
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+
+            # 3. Tratamento de Sucesso (Tabela de Resultados)
+            try:
+                elem = driver.find_element(By.XPATH, xpath_resultado)
+                if elem.is_displayed():
+                    resultado_elemento = elem
+                    break
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+
+            time.sleep(0.3)
+
+        if not resultado_elemento:
+            logger.warning(
+                "   -> [Motor] Tempo esgotado (Timeout) ou tela vazia ao buscar %s.",
+                contrato,
+            )
+            if not validar_sessao_rede(driver):
+                return False, "SESSAO_CAIU", ""
+            return False, "NAO_ENCONTRADO", ""
+
+        try:
+            resultado_elemento.click()
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+
         time.sleep(PAUSA_HUMANA)
 
         driver.switch_to.default_content()
@@ -286,8 +327,7 @@ def buscar_contrato_avancado(driver: webdriver.Chrome, contrato: str) -> tuple:
 
     except Exception:  # pylint: disable=broad-exception-caught
         logger.warning(
-            "   -> [Motor] Tempo esgotado (Timeout) ou tela vazia ao buscar %s.",
-            contrato,
+            "   -> [Motor] Falha crítica de estrutura ao processar %s.", contrato
         )
         if not validar_sessao_rede(driver):
             return False, "SESSAO_CAIU", ""
@@ -543,7 +583,6 @@ def baixar_relatorios_cache(driver: webdriver.Chrome, tipo: str = "frequente"):
             EC.frame_to_be_available_and_switch_to_it((By.NAME, "MainFrame"))
         )
 
-        # --- CANCELADOS ---
         try:
             btn_canc = WebDriverWait(driver, 10).until(
                 EC.element_to_be_clickable((By.ID, "sd7"))
@@ -567,7 +606,6 @@ def baixar_relatorios_cache(driver: webdriver.Chrome, tipo: str = "frequente"):
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error("   -> Falha na pasta de Cancelados: %s", e)
 
-        # Retorno aos Frames
         driver.switch_to.default_content()
         WebDriverWait(driver, 5).until(
             EC.frame_to_be_available_and_switch_to_it((By.NAME, "mainFrame"))
@@ -588,7 +626,6 @@ def baixar_relatorios_cache(driver: webdriver.Chrome, tipo: str = "frequente"):
             EC.frame_to_be_available_and_switch_to_it((By.NAME, "MainFrame"))
         )
 
-        # --- DESISTENTES ---
         try:
             btn_des = WebDriverWait(driver, 10).until(
                 EC.element_to_be_clickable((By.ID, "sd10"))
