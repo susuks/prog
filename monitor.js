@@ -15,7 +15,7 @@ const TOKEN_API = 'CHAVE_SECRETA_ENTERPRISE_V6';
 const MAPA_ORIGENS = {
     "1": "DuoTalk", "2": "Tráfego", "3": "Remarketing", "4": "Contato Lucas",
     "5": "Outro", "6": "Indicação", "7": "RMKT + RMKT pessoal",
-    "8": "TRFG + RMKT pessoal", "9": "DT + RMKT pessoal",
+    "8": "TRFG + RMKT pessoal", "9": "DT + RMKT pessoal",
     "10": "Ctt.L + RMKT pessoal", "11": "Site", "12": "Contato Emanuel"
 };
 
@@ -43,8 +43,34 @@ const logger = winston.createLogger({
 const client = new Client({
     authStrategy: new LocalAuth(),
     authTimeoutMs: 120000, 
-    puppeteer: { headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu'] }
+    puppeteer: { 
+        headless: true, 
+        args: [
+            '--no-sandbox', 
+            '--disable-setuid-sandbox', 
+            '--disable-gpu',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--disable-extensions',
+            '--disable-background-networking',
+            '--disable-background-timer-throttling',
+            '--disable-backgrounding-occluded-windows',
+            '--disable-renderer-backgrounding'
+        ] 
+    }
 });
+
+function notificarAdmin(mensagem) {
+    if (adminLid && client) {
+        try {
+            client.sendMessage(adminLid, mensagem);
+        } catch (e) {
+            logger.error("Falha ao tentar notificar o administrador.");
+        }
+    }
+}
 
 function normalizarLid(rawId) {
     if (!rawId) return '';
@@ -102,7 +128,10 @@ function extrairDados(texto) {
 setInterval(async () => {
     if (filaRetentativas.length > 0) {
         const item = filaRetentativas.shift();
-        logger.info(`Processando retentativa do contrato ${item.dadosVenda.contrato}...`);
+        
+        const msgProcessandoRetry = `[PROCESSANDO RETENTATIVA]\nO contrato ${item.dadosVenda.contrato} do vendedor ${item.dadosVenda.vendedor} está sendo reanalisado...`;
+        logger.info(msgProcessandoRetry);
+        notificarAdmin(msgProcessandoRetry);
         
         try {
             const resposta = await axios.post(URL_API_PYTHON, item.dadosVenda, { 
@@ -111,7 +140,12 @@ setInterval(async () => {
             });
             const status = resposta.data.status_pagamento;
             const planilha = resposta.data.planilha;
-            item.loadingMsg.edit(`[REGISTRADO] Contrato validado com sucesso (após retentativa).\n\nContrato: ${item.dadosVenda.contrato}\nVendedor: ${item.dadosVenda.vendedor}\nPlanilha: ${planilha}\nStatus: ${status}`);
+            const nomeCliente = resposta.data.nome_cliente || "Não informado";
+            
+            const msgSucessoRetry = `[REGISTRADO] Contrato validado com sucesso (após retentativa).\n\nContrato: ${item.dadosVenda.contrato}\nCliente: ${nomeCliente}\nVendedor: ${item.dadosVenda.vendedor}\nPlanilha: ${planilha}\nStatus: ${status}`;
+            item.loadingMsg.edit(msgSucessoRetry);
+            notificarAdmin(msgSucessoRetry);
+            
         } catch (erroApi) {
             let msgTratada = "Falha de comunicação ou erro interno.";
 
@@ -120,11 +154,15 @@ setInterval(async () => {
                 msgTratada = erroApi.response.data.mensagem || msgTratada;
 
                 if (tipoErro === 'duplicidade') {
-                    item.loadingMsg.edit(`[REGISTRADO] ${msgTratada}`);
+                    const msgDupRetry = `[REGISTRADO] ${msgTratada}\n\nVendedor: ${item.dadosVenda.vendedor}`;
+                    item.loadingMsg.edit(msgDupRetry);
+                    notificarAdmin(msgDupRetry);
                     logger.info(`Retentativa cancelada: Contrato ${item.dadosVenda.contrato} já se encontrava registrado.`);
                     return; 
                 } else if (tipoErro === 'planilha_ausente') {
-                    item.loadingMsg.edit(`[ERRO DE SISTEMA] Falha definitiva na retentativa.\n\n${msgTratada}\n\nO bot não tentará novamente até que as planilhas sejam criadas.`);
+                    const msgPlanRetry = `[ERRO DE SISTEMA] Falha definitiva na retentativa.\n\nVendedor: ${item.dadosVenda.vendedor}\nDetalhe: ${msgTratada}\n\nO bot não tentará novamente até que as planilhas sejam criadas.`;
+                    item.loadingMsg.edit(msgPlanRetry);
+                    notificarAdmin(msgPlanRetry);
                     logger.error(`Retentativa abortada por falha de infraestrutura.`);
                     return; 
                 }
@@ -135,7 +173,9 @@ setInterval(async () => {
                 filaRetentativas.push(item);
                 logger.warn(`Falha na retentativa ${item.dadosVenda.contrato}. Devolvido para a fila. Detalhe: ${msgTratada}`);
             } else {
-                item.loadingMsg.edit(`[ERRO] Falha definitiva ao processar contrato após 3 tentativas em background.\n\nContrato: ${item.dadosVenda.contrato}\nÚltimo Erro: ${msgTratada}`);
+                const msgFalhaRetry = `[ERRO] Falha definitiva ao processar contrato após 3 tentativas em background.\n\nContrato: ${item.dadosVenda.contrato}\nVendedor: ${item.dadosVenda.vendedor}\nÚltimo Erro: ${msgTratada}`;
+                item.loadingMsg.edit(msgFalhaRetry);
+                notificarAdmin(msgFalhaRetry);
                 logger.error(`Abandono de retentativa para o contrato ${item.dadosVenda.contrato}.`);
             }
         }
@@ -149,7 +189,6 @@ async function processarMensagem(msg) {
         if (!corpoMsg) return;
 
         const chat = await msg.getChat();
-        
         if (chat.isGroup) return;
         
         const isPrivado = true;
@@ -259,8 +298,10 @@ async function processarMensagem(msg) {
                 dadosVenda.vendedor = nomeVendedor;
                 dadosVenda.telefone = numeroIdentificador;
 
-                const loadingMsg = await msg.reply(`[PROCESSANDO] O contrato ${dadosVenda.contrato} está sendo analisado...`);
+                const msgProcessando = `[PROCESSANDO] O contrato ${dadosVenda.contrato} do vendedor ${nomeVendedor} está sendo analisado...`;
+                const loadingMsg = await msg.reply(msgProcessando);
                 logger.info(`Enviando Contrato: ${dadosVenda.contrato} | Vendedor: ${nomeVendedor}`);
+                notificarAdmin(msgProcessando);
 
                 try {
                     const respostaApp = await axios.post(URL_API_PYTHON, dadosVenda, { 
@@ -269,39 +310,49 @@ async function processarMensagem(msg) {
                     });
                     const status = respostaApp.data.status_pagamento;
                     const planilha = respostaApp.data.planilha;
+                    const nomeCliente = respostaApp.data.nome_cliente || "Não informado";
                     
-                    loadingMsg.edit(`[REGISTRADO] Contrato validado com sucesso.\n\nContrato: ${dadosVenda.contrato}\nVendedor: ${nomeVendedor}\nPlanilha: ${planilha}\nStatus: ${status}`);
+                    const msgSucesso = `[REGISTRADO] Contrato validado com sucesso.\n\nContrato: ${dadosVenda.contrato}\nCliente: ${nomeCliente}\nVendedor: ${nomeVendedor}\nPlanilha: ${planilha}\nStatus: ${status}`;
+                    loadingMsg.edit(msgSucesso);
+                    notificarAdmin(msgSucesso);
 
                 } catch (erroApi) {
-                    // Verificação estrita da resposta da API
                     if (erroApi.response && erroApi.response.data) {
                         const tipoErro = erroApi.response.data.erro;
                         const msgErro = erroApi.response.data.mensagem || 'Erro desconhecido retornado pela API.';
 
                         if (tipoErro === 'duplicidade') {
-                            loadingMsg.edit(`[REGISTRADO] ${msgErro}`);
+                            const msgDup = `[REGISTRADO] ${msgErro}\n\nVendedor: ${nomeVendedor}`;
+                            loadingMsg.edit(msgDup);
+                            notificarAdmin(msgDup);
                             logger.info(`Contrato ${dadosVenda.contrato} ignorado na fila. Motivo: Duplicidade (409).`);
                         
                         } else if (tipoErro === 'planilha_ausente') {
-                            loadingMsg.edit(`[ERRO DE SISTEMA] ${msgErro}\n\nCrie as planilhas ou abas ausentes e reenvie a mensagem para tentar novamente.`);
+                            const msgPlan = `[ERRO DE SISTEMA] ${msgErro}\n\nVendedor: ${nomeVendedor}\n\nCrie as planilhas ou abas ausentes e reenvie a mensagem para tentar novamente.`;
+                            loadingMsg.edit(msgPlan);
+                            notificarAdmin(msgPlan);
                             logger.error(`Falha de infraestrutura no contrato ${dadosVenda.contrato}.`);
                         
                         } else if (tipoErro === 'contrato_nao_encontrado') {
                             logger.warn(`Contrato ${dadosVenda.contrato} não encontrado no portal. Transferindo para fila de resiliência.`);
                             filaRetentativas.push({ dadosVenda, loadingMsg, tentativas: 0 });
-                            loadingMsg.edit(`[AVISO] ${msgErro}\n\nO bot tentará encontrar o contrato novamente em background (esperando o portal atualizar).`);
+                            const msgNaoEnc = `[AVISO] ${msgErro}\n\nVendedor: ${nomeVendedor}\n\nO bot tentará encontrar o contrato novamente em background (esperando o portal atualizar).`;
+                            loadingMsg.edit(msgNaoEnc);
+                            notificarAdmin(msgNaoEnc);
                         
                         } else {
-                            // Cobre 'falha_gravacao' ou 'erro_interno'
                             logger.error(`Falha no contrato ${dadosVenda.contrato} (${tipoErro}). Transferindo para resiliência.`);
                             filaRetentativas.push({ dadosVenda, loadingMsg, tentativas: 0 });
-                            loadingMsg.edit(`[AVISO] Lentidão ou falha de gravação detectada.\nDetalhe: ${msgErro}\n\nO bot transferiu o contrato para a fila de retentativas.`);
+                            const msgFalha = `[AVISO] Lentidão ou falha de gravação detectada.\nDetalhe: ${msgErro}\n\nVendedor: ${nomeVendedor}\n\nO bot transferiu o contrato para a fila de retentativas.`;
+                            loadingMsg.edit(msgFalha);
+                            notificarAdmin(msgFalha);
                         }
                     } else {
-                        // Trata quedas de rede onde o Node sequer consegue falar com o Python
                         logger.error(`Falha de comunicação offline no contrato ${dadosVenda.contrato}. Transferindo para fila de resiliência.`);
                         filaRetentativas.push({ dadosVenda, loadingMsg, tentativas: 0 });
-                        loadingMsg.edit(`[AVISO] Falha de comunicação com o motor Python. O bot tentará registrar o contrato ${dadosVenda.contrato} novamente em background.`);
+                        const msgOffline = `[AVISO] Falha de comunicação com o motor Python. O bot tentará registrar o contrato ${dadosVenda.contrato} novamente em background.\n\nVendedor: ${nomeVendedor}`;
+                        loadingMsg.edit(msgOffline);
+                        notificarAdmin(msgOffline);
                     }
                 }
 

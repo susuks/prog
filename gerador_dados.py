@@ -1,9 +1,9 @@
 """
 Módulo Gerenciador de Dados e Arquivos.
 
-Responsável por centralizar a manipulação de dados estáticos, configurações
+Responsável por centralizar toda a manipulação de dados estáticos, configurações
 de ambiente, formatação de textos (Regex), operações de Entrada/Saída (I/O) em
-ficheiros locais (JSON, CSV) e integração com a API do Google Sheets.
+arquivos locais (JSON, CSV) e integração com a API do Google Sheets.
 """
 
 import os
@@ -14,9 +14,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from bs4 import BeautifulSoup
 
-logger = logging.getLogger("EnterpriseDados")
+logger = logging.getLogger("EnterpriseBot")
 
 # ============================================================================
 # CONSTANTES E CAMINHOS DE ARQUIVOS
@@ -25,21 +24,10 @@ ARQUIVO_FILA = "files/fila_vendas.csv"
 ARQUIVO_EM_PROCESSAMENTO = "files/temp_processando.csv"
 ARQUIVO_HISTORICO_SUCESSO = "files/historico_concluidos.csv"
 ARQUIVO_PENDENTES = "files/pendentes_reanalise.json"
-ARQUIVO_ADIMPLENCIA = "files/adimplencia.json"
 ARQUIVO_CACHE_PLANILHAS = "files/cache_planilhas.json"
 ARQUIVO_CONFIG = "files/config.txt"
-
-# Cache Frequente e Diário (Relatórios Offline)
-CACHE_CANCELADOS = "files/cache_cancelados.html"
-CACHE_DESISTENTES = "files/cache_desistentes.html"
-CACHE_CANCELADOS_DIARIO = "files/cache_cancelados_diario.html"
-CACHE_DESISTENTES_DIARIO = "files/cache_desistentes_diario.html"
-
 MAX_TENTATIVAS = 10000
 TEMPO_INATIVIDADE_MAXIMO = 300
-
-# Freio de segurança da API do Google (Reduzir para 0.0 após aumento de cota no Cloud)
-PAUSA_API_GOOGLE = 1.0
 
 
 # ============================================================================
@@ -47,8 +35,7 @@ PAUSA_API_GOOGLE = 1.0
 # ============================================================================
 def carregar_configuracoes() -> dict:
     """
-    Lê o ficheiro de configuração local (config.txt) e extrai credenciais,
-    parâmetros de sistema e tempos de intervalo para as rotinas de automação.
+    Lê o arquivo de configuração local e extrai credenciais e parâmetros.
     """
     config = {
         "MATRICULA": "",
@@ -56,9 +43,6 @@ def carregar_configuracoes() -> dict:
         "PREFIXO_PLANILHA": "Controle de Vendas -- ",
         "ANO_GERAL": "2026",
         "MODO_DESKTOP": False,
-        "INTERVALO_SINC_RELATORIOS": 3600,
-        "INTERVALO_REANALISE_ADIMPLENCIA": 14400,
-        "LIMITE_DIAS_DESATIVACAO": 45,
     }
 
     if not os.path.exists(ARQUIVO_CONFIG):
@@ -79,15 +63,6 @@ def carregar_configuracoes() -> dict:
                             "sim",
                             "v",
                         ]
-                    elif chave in [
-                        "INTERVALO_SINC_RELATORIOS",
-                        "INTERVALO_REANALISE_ADIMPLENCIA",
-                        "LIMITE_DIAS_DESATIVACAO",
-                    ]:
-                        try:
-                            config[chave] = int(valor_limpo)
-                        except ValueError:
-                            pass
                     else:
                         config[chave] = valor_limpo
         return config
@@ -96,7 +71,10 @@ def carregar_configuracoes() -> dict:
 
 
 def obter_mes_utc4() -> str:
-    """Calcula o fuso horário UTC-4 e retorna o mês atual em português."""
+    """
+    Calcula a data e hora atual no fuso horário UTC-4 e retorna o mês correspondente.
+    Avaliação dinâmica para evitar o congelamento da variável em viradas de mês.
+    """
     meses_pt = {
         1: "JANEIRO",
         2: "FEVEREIRO ",
@@ -116,6 +94,7 @@ def obter_mes_utc4() -> str:
     return meses_pt[agora.month]
 
 
+# Inicialização em tempo de importação para uso global
 CONFIG = carregar_configuracoes()
 USUARIO_LOGIN = CONFIG.get("MATRICULA")
 SENHA_LOGIN = CONFIG.get("SENHA")
@@ -125,10 +104,12 @@ MODO_DESKTOP = CONFIG.get("MODO_DESKTOP")
 
 
 # ============================================================================
-# PROCESSAMENTO DE DADOS (REGEX) E MANIPULAÇÃO JSON/CSV
+# PROCESSAMENTO DE DADOS E FORMATAÇÃO (REGEX)
 # ============================================================================
 def limpar_inteiro(texto: str) -> int:
-    """Extrai todos os dígitos numéricos e converte para inteiro."""
+    """
+    Extrai todos os dígitos numéricos de uma string e os converte para inteiro.
+    """
     try:
         numeros = re.sub(r"\D", "", str(texto))
         return int(numeros) if numeros else 0
@@ -137,7 +118,9 @@ def limpar_inteiro(texto: str) -> int:
 
 
 def limpar_valor(texto: str) -> float:
-    """Converte um valor monetário no formato brasileiro para float."""
+    """
+    Converte uma string de valor monetário brasileiro para o formato float.
+    """
     try:
         match = re.search(r"([\d\.]+,\d{2})", str(texto))
         if match:
@@ -148,25 +131,34 @@ def limpar_valor(texto: str) -> float:
         return 0.00
 
 
+# ============================================================================
+# MANIPULAÇÃO DE ARQUIVOS LOCAIS (JSON / CSV)
+# ============================================================================
 def carregar_pendentes() -> dict:
-    """Lê o ficheiro JSON de contratos pendentes de reanálise (1ª parcela)."""
+    """
+    Carrega o arquivo JSON que armazena os contratos na fila de reanálise.
+    """
     if os.path.exists(ARQUIVO_PENDENTES):
         try:
             with open(ARQUIVO_PENDENTES, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:  # pylint: disable=broad-exception-caught
+        except (OSError, json.JSONDecodeError):
             return {}
     return {}
 
 
 def salvar_pendentes(dados: dict) -> None:
-    """Grava as alterações no ficheiro JSON de contratos pendentes."""
+    """
+    Persiste o dicionário de contratos pendentes no arquivo JSON.
+    """
     with open(ARQUIVO_PENDENTES, "w", encoding="utf-8") as f:
         json.dump(dados, f, indent=4)
 
 
 def verificar_contrato_registrado(contrato: str) -> bool:
-    """Garante que um contrato não seja processado em duplicidade."""
+    """
+    Consulta a memória local (pendentes e histórico) para evitar duplicidade.
+    """
     pendentes = carregar_pendentes()
     if str(contrato) in pendentes:
         return True
@@ -179,6 +171,7 @@ def verificar_contrato_registrado(contrato: str) -> bool:
                         return True
         except OSError:
             pass
+
     return False
 
 
@@ -191,7 +184,10 @@ def adicionar_para_reanalise(
     dados_completos: dict,
     aba_original: str,
 ) -> None:
-    """Adiciona um novo contrato à fila de reanálise de primeira parcela."""
+    """
+    Registra um contrato pendente de pagamento na memória de curto prazo (JSON),
+    incluindo a data de inclusão e a aba original para controle preciso.
+    """
     pendentes = carregar_pendentes()
     pendentes[contrato] = {
         "vendedor_nome": vendedor_nome,
@@ -205,6 +201,11 @@ def adicionar_para_reanalise(
         "aba_original": aba_original,
     }
     salvar_pendentes(pendentes)
+    logger.info(
+        "   [AGENDADO] Contrato %s adicionado à reanálise de 30 dias (Aba: %s).",
+        contrato,
+        aba_original,
+    )
 
 
 def salvar_historico_concluido(
@@ -214,7 +215,9 @@ def salvar_historico_concluido(
     vendedor_tel: str,
     status_pag: str,
 ) -> None:
-    """Regista localmente num CSV o histórico de contratos com 1ª parcela paga."""
+    """
+    Grava os metadados de um contrato processado definitivamente em log CSV.
+    """
     existe = os.path.exists(ARQUIVO_HISTORICO_SUCESSO)
     try:
         with open(ARQUIVO_HISTORICO_SUCESSO, "a", encoding="utf-8") as f:
@@ -229,7 +232,6 @@ def salvar_historico_concluido(
             safe_planilha = str(nome_planilha).replace(",", ".")
             safe_nome = str(vendedor_nome).replace(",", ".")
 
-            # Quebra de linha aplicada para respeitar o limite de 100 caracteres do PEP 8
             linha = (
                 f"{contrato},{safe_planilha},{data_hora},"
                 f"{safe_nome},{vendedor_tel},{status_pag}\n"
@@ -240,109 +242,12 @@ def salvar_historico_concluido(
 
 
 # ============================================================================
-# MÓDULO CRM: GESTÃO DE ADIMPLÊNCIA E CACHE OFFLINE
-# ============================================================================
-def carregar_adimplencia() -> dict:
-    """Carrega a base de clientes do CRM."""
-    if os.path.exists(ARQUIVO_ADIMPLENCIA):
-        try:
-            with open(ARQUIVO_ADIMPLENCIA, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:  # pylint: disable=broad-exception-caught
-            return {}
-    return {}
-
-
-def salvar_adimplencia(dados: dict) -> None:
-    """Persiste o banco de dados do CRM em disco."""
-    with open(ARQUIVO_ADIMPLENCIA, "w", encoding="utf-8") as f:
-        json.dump(dados, f, indent=4)
-
-
-def migrar_para_adimplencia(contrato: str, info_pendente: dict, grupo: str, cota: str):
-    """
-    Transfere o cliente para o CRM e inicializa a infraestrutura de Cache Delta.
-    """
-    bd = carregar_adimplencia()
-    if contrato not in bd:
-        bd[contrato] = {
-            "vendedor_nome": info_pendente.get("vendedor_nome"),
-            "nome_planilha": info_pendente.get("nome_planilha"),
-            "aba_original": info_pendente.get("aba_original"),
-            "grupo": grupo,
-            "cota": cota,
-            "cota_versao": None,
-            "monitorar": True,
-            "ultima_verificacao": 0,
-            "data_limbo": None,
-            "ultimo_status": None,  # Delta Cache: Status Financeiro
-            "ultimas_parcelas": 0,  # Delta Cache: Pagamentos
-        }
-        salvar_adimplencia(bd)
-
-
-def buscar_status_offline_regex(grupo: str, cota: str, cota_versao: str = None) -> str:
-    """Parsing estrutural (BeautifulSoup) para validação exata do cliente em offline."""
-    if not cota_versao:
-        return ""
-
-    grupo_alvo = limpar_inteiro(grupo)
-    cota_base_alvo = limpar_inteiro(str(cota).split("-", maxsplit=1)[0])
-
-    versao_alvo = None
-    match_v = re.search(r"(\d+)\s*-\s*(\d+)", str(cota_versao))
-    if match_v:
-        versao_alvo = limpar_inteiro(match_v.group(2))
-    else:
-        return ""
-
-    lista_arquivos = [
-        ("Cancelado", CACHE_CANCELADOS),
-        ("Desistente", CACHE_DESISTENTES),
-        ("Cancelado", CACHE_CANCELADOS_DIARIO),
-        ("Desistente", CACHE_DESISTENTES_DIARIO),
-    ]
-
-    for status, arquivo in lista_arquivos:
-        if os.path.exists(arquivo):
-            try:
-                with open(arquivo, "r", encoding="utf-8", errors="ignore") as f:
-                    sopa = BeautifulSoup(f.read(), "html.parser")
-                    linhas = sopa.find_all("tr")
-
-                    for linha in linhas:
-                        colunas = linha.find_all("td")
-                        if len(colunas) >= 3:
-                            texto_grupo = colunas[0].get_text(strip=True)
-                            texto_cota_bruto = colunas[1].get_text(strip=True)
-
-                            grupo_html = limpar_inteiro(texto_grupo)
-                            match_cota_html = re.search(
-                                r"(\d+)\s*-\s*(\d+)", texto_cota_bruto
-                            )
-
-                            if match_cota_html:
-                                cota_base_html = limpar_inteiro(
-                                    match_cota_html.group(1)
-                                )
-                                versao_html = limpar_inteiro(match_cota_html.group(2))
-
-                                if (
-                                    grupo_html == grupo_alvo
-                                    and cota_base_html == cota_base_alvo
-                                ):
-                                    if versao_html == versao_alvo:
-                                        return status
-            except Exception as e:  # pylint: disable=broad-exception-caught
-                logger.error("Falha no Parsing do ficheiro %s: %s", arquivo, e)
-    return ""
-
-
-# ============================================================================
-# COMUNICAÇÃO COM GOOGLE SHEETS
+# COMUNICAÇÃO COM GOOGLE SHEETS E CACHE DE IDs
 # ============================================================================
 def conectar_google_sheets(nome_planilha: str, aba: str):
-    """Estabelece ligação à API do Google Sheets e devolve a aba requisitada."""
+    """
+    Estabelece uma conexão autenticada via API com uma planilha e aba específica.
+    """
     scope = [
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive",
@@ -353,7 +258,7 @@ def conectar_google_sheets(nome_planilha: str, aba: str):
         )
         cliente = gspread.authorize(creds)
     except Exception as e:  # pylint: disable=broad-exception-caught
-        logger.error("   [ERRO CREDENCIAIS] Falha no Google Sheets: %s", e)
+        logger.error("   [ERRO CREDENCIAIS] Falha ao autorizar Google Sheets: %s", e)
         return None
 
     cache = {}
@@ -378,16 +283,27 @@ def conectar_google_sheets(nome_planilha: str, aba: str):
             with open(ARQUIVO_CACHE_PLANILHAS, "w", encoding="utf-8") as f:
                 json.dump(cache, f, indent=4)
         except Exception:  # pylint: disable=broad-exception-caught
+            logger.warning(
+                "   [AVISO] Planilha '%s' não encontrada no Drive.", nome_planilha
+            )
             return None
 
     try:
         return planilha.worksheet(aba)
-    except Exception:  # pylint: disable=broad-exception-caught
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.warning(
+            "   [AVISO] Aba '%s' não encontrada na planilha '%s'. Detalhe: %s",
+            aba,
+            nome_planilha,
+            e,
+        )
         return None
 
 
 def encontrar_proxima_linha_vazia(sheet, start_row: int, check_col: int) -> int:
-    """Localiza a primeira linha vazia numa coluna específica da folha."""
+    """
+    Varre verticalmente uma coluna chave para encontrar a primeira célula vazia.
+    """
     coluna_alvo = sheet.col_values(check_col)
     if len(coluna_alvo) < start_row:
         return start_row
@@ -402,7 +318,9 @@ def encontrar_proxima_linha_vazia(sheet, start_row: int, check_col: int) -> int:
 
 
 def encontrar_linha_do_contrato(sheet, contrato: str, col_idx: int) -> int:
-    """Localiza a linha em que um determinado contrato está registado na folha."""
+    """
+    Localiza o índice da linha na qual um contrato específico foi gravado.
+    """
     try:
         valores = sheet.col_values(col_idx)
         for i, valor in enumerate(valores, start=1):
@@ -410,13 +328,15 @@ def encontrar_linha_do_contrato(sheet, contrato: str, col_idx: int) -> int:
                 return i
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error("   [ERRO BUSCA PLANILHA] Falha ao localizar cota: %s", e)
-    return 0
+    return None
 
 
 def atualizar_planilha_vendedor(
     sheet, row_csv: dict, dados_site: dict, contrato: str
 ) -> str:
-    """Regista os dados cadastrais e financeiros do contrato na folha do vendedor."""
+    """
+    Compila os dados raspados e injeta na planilha individual do Vendedor.
+    """
     linha = encontrar_proxima_linha_vazia(sheet, start_row=12, check_col=4)
     status_pag = "1º Parcela Paga" if dados_site.get("pago") else ""
 
@@ -435,12 +355,12 @@ def atualizar_planilha_vendedor(
     lance_val = 0.00
     try:
         str_lance = str(row_csv.get("lance livre", 0))
-        limpo = str_lance.replace("R$", "").replace(".", "").replace(",", ".").strip()
-        lance_val = float(limpo)
+        val_limpo = (
+            str_lance.replace("R$", "").replace(".", "").replace(",", ".").strip()
+        )
+        lance_val = float(val_limpo)
     except (ValueError, TypeError):
         pass
-
-    cota_planilha = str(dados_site.get("cota", "")).split("-", maxsplit=1)[0].strip()
 
     dados_financeiros = [
         dados_site.get("credito", 0.00),
@@ -448,7 +368,7 @@ def atualizar_planilha_vendedor(
         "",
         str(contrato),
         str(dados_site.get("grupo", "")),
-        cota_planilha,
+        str(dados_site.get("cota", "")),
         str(dados_site.get("estado", "")),
     ]
 
@@ -463,13 +383,17 @@ def atualizar_planilha_vendedor(
         values=[dados_financeiros],
         value_input_option="USER_ENTERED",
     )
+
     return status_pag
 
 
 def atualizar_planilha_geral(
     sheet, row_csv: dict, dados_site: dict, contrato: str
 ) -> str:
-    """Regista os dados completos do contrato na folha GERAL (Mensal ou Anual)."""
+    """
+    Compila os dados raspados e injeta na planilha GERAL (Gestão Centralizada).
+    Adiciona a data de registro na coluna R.
+    """
     linha = encontrar_proxima_linha_vazia(sheet, start_row=7, check_col=3)
     status_pag = "1º Parcela Paga" if dados_site.get("pago") else ""
 
@@ -488,14 +412,15 @@ def atualizar_planilha_geral(
     lance_val = 0.00
     try:
         str_lance = str(row_csv.get("lance livre", 0))
-        limpo = str_lance.replace("R$", "").replace(".", "").replace(",", ".").strip()
-        lance_val = float(limpo)
+        val_limpo = (
+            str_lance.replace("R$", "").replace(".", "").replace(",", ".").strip()
+        )
+        lance_val = float(val_limpo)
     except (ValueError, TypeError):
         pass
 
     fuso_utc4 = timezone(timedelta(hours=-4))
     data_registro_atual = datetime.now(fuso_utc4).strftime("%d/%m/%Y")
-    cota_planilha = str(dados_site.get("cota", "")).split("-", maxsplit=1)[0].strip()
 
     dados_financeiros = [
         dados_site.get("credito", 0.00),
@@ -503,11 +428,11 @@ def atualizar_planilha_geral(
         "",
         str(contrato),
         str(dados_site.get("grupo", "")),
-        cota_planilha,
+        str(dados_site.get("cota", "")),
         str(dados_site.get("estado", "")),
         str(dados_site.get("cpf", "")),
         str(row_csv.get("vendedor", "")),
-        data_registro_atual,
+        data_registro_atual,  # Coluna R
     ]
 
     sheet.update_cell(linha, 1, status_pag)
@@ -516,51 +441,11 @@ def atualizar_planilha_geral(
         values=[dados_cadastrais],
         value_input_option="USER_ENTERED",
     )
+    # Extensão do intervalo até à coluna R
     sheet.update(
         range_name=f"I{linha}:R{linha}",
         values=[dados_financeiros],
         value_input_option="USER_ENTERED",
     )
+
     return status_pag
-
-
-def registrar_adimplencia_planilhas(
-    sheet,
-    contrato: str,
-    status_pgto: str,
-    parcelas: int,
-    status_cliente: str,
-    col_busca: int,
-):
-    """
-    Submete a atualização do cliente (Delta) nas extremidades financeiras da folha de cálculo.
-    """
-    linha = encontrar_linha_do_contrato(sheet, contrato, col_busca)
-    if linha:
-        try:
-            dados_adimplencia = [str(status_pgto), int(parcelas), str(status_cliente)]
-            sheet.update(
-                range_name=f"S{linha}:U{linha}",
-                values=[dados_adimplencia],
-                value_input_option="USER_ENTERED",
-            )
-            time.sleep(PAUSA_API_GOOGLE)
-            return True
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.error("Falha ao atualizar colunas no contrato %s: %s", contrato, e)
-    return False
-
-
-def registrar_apenas_situacao_cliente(
-    sheet, contrato: str, status_cliente: str, col_busca: int
-):
-    """Atualiza a coluna de Situação (ex: 'Inacessível') sem alterar dados financeiros."""
-    linha = encontrar_linha_do_contrato(sheet, contrato, col_busca)
-    if linha:
-        try:
-            sheet.update_cell(linha, 21, str(status_cliente))
-            time.sleep(PAUSA_API_GOOGLE)
-            return True
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.error("Falha ao atualizar Situação no contrato %s: %s", contrato, e)
-    return False
