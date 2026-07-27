@@ -46,33 +46,43 @@ def aquecer_sessao_asp(sessao: requests.Session):
     simulando o carregamento dos frames visuais que o Selenium faria naturalmente.
     """
     try:
-        sessao.get(
-            "https://intranet.consorciotradicao.com.br/autocred/MasterFrameset.asp",
-            timeout=10,
+        url_master = (
+            "https://intranet.consorciotradicao.com.br/autocred/MasterFrameset.asp"
         )
-        sessao.get(
-            "https://intranet.consorciotradicao.com.br/autocred/LeftFrame.asp?codigo_modulo=AG",
-            timeout=10,
+        url_left = (
+            "https://intranet.consorciotradicao.com.br/autocred/LeftFrame.asp?codigo_modulo=AG"
         )
+
+        sessao.get(url_master, timeout=10)
+        sessao.get(url_left, timeout=10)
         logger_crm.info(
             "[SISTEMA] Sessão HTTP aquecida com sucesso (Estado ASP sincronizado)."
         )
         return True
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
         logger_crm.error("[SISTEMA] Falha ao aquecer a sessão: %s", e)
         return False
 
 
 def criar_sessao_hibrida() -> requests.Session:
+    """
+    Sequestra os cookies do Selenium e forja uma sessão HTTP 100% nativa.
+    """
     logger_crm.info("=== Iniciando Sequestro de Sessão (Híbrido - V2) ===")
     driver = iniciar_navegador()
     sessao_http = requests.Session()
 
-    # Cabeçalho limpo. Sem inventar parâmetros que acionam o Firewall.
     sessao_http.headers.update(
         {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": (
+                "text/html,application/xhtml+xml,application/xml;"
+                "q=0.9,image/avif,image/webp,*/*;q=0.8"
+            ),
         }
     )
 
@@ -84,7 +94,6 @@ def criar_sessao_hibrida() -> requests.Session:
         logger_crm.info("[SUCESSO] Cookies extraídos. Destruindo interface visual.")
         driver.quit()
 
-        # Faz o aquecimento logo após o sequestro
         aquecer_sessao_asp(sessao_http)
         return sessao_http
 
@@ -94,6 +103,9 @@ def criar_sessao_hibrida() -> requests.Session:
 
 
 def loop_reanalise_adimplencia():
+    """
+    Motor principal que processa ininterruptamente a fila de clientes.
+    """
     logger_crm.info("=== Motor CDA (HTTP Reconstruído) Iniciado ===")
 
     sessao_http = criar_sessao_hibrida()
@@ -232,8 +244,10 @@ def loop_reanalise_adimplencia():
                 if dados_rede.get("cpf") and dados_rede["cpf"] != info.get("cpf"):
                     info["cpf"] = dados_rede["cpf"]
 
+                recuperou_do_limbo = False
                 if info.get("data_limbo") is not None:
                     info["data_limbo"] = None
+                    recuperou_do_limbo = True
 
                 st_atual = dados_rede.get("status_pagamento", "N/A")
                 pc_atual = dados_rede.get("parcelas_pagas", 0)
@@ -241,12 +255,23 @@ def loop_reanalise_adimplencia():
                 pc_anterior = info.get("ultimas_parcelas")
                 fotografia = f"[{st_atual} | {pc_atual} parc. | Ativo]"
 
-                if st_atual != st_anterior or pc_atual != pc_anterior:
-                    logger_crm.info(
-                        "    [ATUALIZAÇÃO] %s -> %s. Sincronizando Sheets.",
-                        contrato,
-                        fotografia,
-                    )
+                if (
+                    st_atual != st_anterior
+                    or pc_atual != pc_anterior
+                    or recuperou_do_limbo
+                ):
+                    if recuperou_do_limbo:
+                        logger_crm.info(
+                            "    [RESSURREIÇÃO] %s saiu do Limbo. Restaurando status.",
+                            contrato,
+                        )
+                    else:
+                        logger_crm.info(
+                            "    [ATUALIZAÇÃO] %s -> %s. Sincronizando Sheets.",
+                            contrato,
+                            fotografia,
+                        )
+
                     sheet_v = conectar_google_sheets(
                         info["nome_planilha"], info["aba_original"]
                     )
@@ -303,20 +328,37 @@ def loop_reanalise_adimplencia():
                     sessao_http = None
                     break
 
-                elif motivo == "NAO_ENCONTRADO":
+                if motivo == "NAO_ENCONTRADO":
                     info["ultima_verificacao"] = time.time()
                     if not info.get("data_limbo"):
                         info["data_limbo"] = time.time()
                         logger_crm.warning(
-                            "    [LIMBO NOVO] Contrato %s inacessível. -> [? | ? | Inacessível]",
+                            "    [LIMBO NOVO] Contrato %s inacessível. -> "
+                            "[? | ? | Inacessível]",
                             contrato,
                         )
+
                         sheet_v = conectar_google_sheets(
                             info["nome_planilha"], info["aba_original"]
                         )
+                        sheet_g_ano = conectar_google_sheets(
+                            f"{PREFIXO_PLANILHA}GERAL", NOME_ABA_GERAL
+                        )
+                        sheet_g_mes = conectar_google_sheets(
+                            f"{PREFIXO_PLANILHA}GERAL", info["aba_original"]
+                        )
+
                         if sheet_v:
                             registrar_apenas_situacao_cliente(
                                 sheet_v, contrato, "Inacessível", 13, 19
+                            )
+                        if sheet_g_ano:
+                            registrar_apenas_situacao_cliente(
+                                sheet_g_ano, contrato, "Inacessível", 12, 21
+                            )
+                        if sheet_g_mes:
+                            registrar_apenas_situacao_cliente(
+                                sheet_g_mes, contrato, "Inacessível", 12, 21
                             )
                     else:
                         dias = int((time.time() - info["data_limbo"]) / 86400)

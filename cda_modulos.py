@@ -21,21 +21,30 @@ PAUSA_API_GOOGLE = 0.5
 
 
 def carregar_adimplencia() -> dict:
+    """
+    Lê o ficheiro JSON contendo o estado de todos os contratos em monitorização.
+    """
     if os.path.exists(ARQUIVO_ADIMPLENCIA):
         try:
             with open(ARQUIVO_ADIMPLENCIA, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             return {}
     return {}
 
 
 def salvar_adimplencia(dados: dict) -> None:
+    """
+    Guarda o estado de monitorização no ficheiro JSON persistente.
+    """
     with open(ARQUIVO_ADIMPLENCIA, "w", encoding="utf-8") as f:
         json.dump(dados, f, indent=4)
 
 
 def migrar_para_adimplencia(contrato: str, info_pendente: dict, grupo: str, cota: str):
+    """
+    Transita um contrato novo para a fila de adimplência.
+    """
     bd = carregar_adimplencia()
     if str(contrato) not in bd:
         cpf_cru = info_pendente.get("dados_originais", {}).get("cpf")
@@ -66,17 +75,20 @@ def registrar_adimplencia_planilhas(
     col_inicio: str,
     col_fim: str,
 ):
+    """
+    Insere os três blocos de dados do cliente na respetiva aba do Google Sheets.
+    """
     linha = encontrar_linha_do_contrato(sheet, contrato, col_busca)
     if linha:
         try:
+            intervalo = f"{col_inicio}{linha}:{col_fim}{linha}"
+            valores = [[str(status_pgto), int(parcelas), str(status_cliente)]]
             sheet.update(
-                range_name=f"{col_inicio}{linha}:{col_fim}{linha}",
-                values=[[str(status_pgto), int(parcelas), str(status_cliente)]],
-                value_input_option="USER_ENTERED",
+                range_name=intervalo, values=valores, value_input_option="USER_ENTERED"
             )
             time.sleep(PAUSA_API_GOOGLE)
             return True
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             pass
     return False
 
@@ -84,15 +96,36 @@ def registrar_adimplencia_planilhas(
 def registrar_apenas_situacao_cliente(
     sheet, contrato: str, status_cliente: str, col_busca: int, col_situacao: int
 ):
+    """
+    Atualiza estritamente a célula de situação (Ex: Cancelado, Inacessível).
+    """
     linha = encontrar_linha_do_contrato(sheet, contrato, col_busca)
     if linha:
         try:
             sheet.update_cell(linha, col_situacao, str(status_cliente))
             time.sleep(PAUSA_API_GOOGLE)
             return True
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             pass
     return False
+
+
+def validar_morte_sessao(texto_html: str) -> bool:
+    """
+    Verifica se a String HTML devolvida pelo ASP contém assinaturas de bloqueio.
+    """
+    html_min = texto_html.lower()
+    gatilhos = [
+        "acesso não permitido",
+        "j_username",
+        "senha",
+        "sessão expirou",
+        "novo login",
+        "default.asp",
+        "alert('",
+        "window.top.location",
+    ]
+    return any(gatilho in html_min for gatilho in gatilhos)
 
 
 def consultar_adimplencia_http_v2(
@@ -101,17 +134,20 @@ def consultar_adimplencia_http_v2(
     """Extração reconstruída: Segue o fluxo linear exigido pelo servidor."""
     grupo = str(info.get("grupo")).strip()
     cota_str = str(info.get("cota")).strip()
-    cota_base = cota_str.split("-")[0].strip() if "-" in cota_str else cota_str
+    cota_base = (
+        cota_str.split("-", maxsplit=1)[0].strip() if "-" in cota_str else cota_str
+    )
     cpf_cliente = re.sub(r"\D", "", str(info.get("cpf"))) if info.get("cpf") else None
 
-    url_pesquisa = "https://intranet.consorciotradicao.com.br/autocred/Attendance/searchCota.asp?codigo_formulario_intranet=4&descricao_formulario_intranet=Consorciado"
+    url_pesquisa = (
+        "https://intranet.consorciotradicao.com.br/autocred/"
+        "Attendance/searchCota.asp?codigo_formulario_intranet=4&"
+        "descricao_formulario_intranet=Consorciado"
+    )
+    url_left = "https://intranet.consorciotradicao.com.br/autocred/LeftFrame.asp?codigo_modulo=AG"
 
     # 1. Carrega a página de pesquisa (GET) para inicializar a sessão do formulário interno
-    sessao.headers.update(
-        {
-            "Referer": "https://intranet.consorciotradicao.com.br/autocred/LeftFrame.asp?codigo_modulo=AG"
-        }
-    )
+    sessao.headers.update({"Referer": url_left})
     try:
         res_pre = sessao.get(url_pesquisa, timeout=10)
         if (
@@ -119,7 +155,7 @@ def consultar_adimplencia_http_v2(
             or "acesso não permitido" in res_pre.text.lower()
         ):
             return {"encontrou": False, "motivo": "SESSAO_CAIU"}
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught
         return {"encontrou": False, "motivo": "FALHA_REDE"}
 
     # 2. Submete os dados (POST)
@@ -145,24 +181,22 @@ def consultar_adimplencia_http_v2(
                     break
 
         if not cpf_cliente:
-            return {
-                "encontrou": False,
-                "motivo": "NAO_ENCONTRADO",
-            }  # Corrigido: se não achou CPF na tabela, é Limbo.
+            return {"encontrou": False, "motivo": "NAO_ENCONTRADO"}
 
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught
         return {"encontrou": False, "motivo": "FALHA_REDE"}
 
     # 3. Ler Painel de Parcelas Pagas
-    url_painel = f"https://intranet.consorciotradicao.com.br/autocred/Attendance/dataCota.asp?Codigo_Grupo={grupo}&Codigo_Cota={cota_base}&cgc_cpf_cliente={cpf_cliente}"
+    url_painel = (
+        f"https://intranet.consorciotradicao.com.br/autocred/Attendance/dataCota.asp?"
+        f"Codigo_Grupo={grupo}&Codigo_Cota={cota_base}&cgc_cpf_cliente={cpf_cliente}"
+    )
     sessao.headers.update({"Referer": url_pesquisa})
     parcelas_pagas = 0
     try:
         res_painel = sessao.get(url_painel, timeout=10)
-        if (
-            "j_username" in res_painel.text.lower()
-            or "acesso não permitido" in res_painel.text.lower()
-        ):
+        html_painel = res_painel.text.lower()
+        if "j_username" in html_painel or "acesso não permitido" in html_painel:
             return {"encontrou": False, "motivo": "SESSAO_CAIU"}
 
         sopa = BeautifulSoup(res_painel.text, "html.parser")
@@ -172,20 +206,22 @@ def consultar_adimplencia_http_v2(
         if td_parcelas:
             td_valor = td_parcelas.find_next_sibling("td")
             parcelas_pagas = int(re.sub(r"\D", "", td_valor.text)) if td_valor else 0
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught
         pass
 
     # 4. Ler Status da 2ª Via
     desc = urllib.parse.quote("2ª Via Boleto", encoding="iso-8859-1")
-    url_2via = f"https://intranet.consorciotradicao.com.br/autocred/Attendance/emissSlip.asp?tipo=0&cgc_cpf_cliente={cpf_cliente}&Codigo_Grupo={grupo}&Codigo_Cota={cota_base}&codigo_formulario_filho_intranet=67&descricao_formulario_filho_intranet={desc}"
+    url_2via = (
+        f"https://intranet.consorciotradicao.com.br/autocred/Attendance/emissSlip.asp?"
+        f"tipo=0&cgc_cpf_cliente={cpf_cliente}&Codigo_Grupo={grupo}&Codigo_Cota={cota_base}&"
+        f"codigo_formulario_filho_intranet=67&descricao_formulario_filho_intranet={desc}"
+    )
     sessao.headers.update({"Referer": url_painel})
 
     try:
         res_2via = sessao.get(url_2via, timeout=10)
-        if (
-            "j_username" in res_2via.text.lower()
-            or "acesso não permitido" in res_2via.text.lower()
-        ):
+        html_2via = res_2via.text.lower()
+        if "j_username" in html_2via or "acesso não permitido" in html_2via:
             return {"encontrou": False, "motivo": "SESSAO_CAIU"}
 
         sopa2 = BeautifulSoup(res_2via.text, "html.parser")
@@ -216,11 +252,10 @@ def consultar_adimplencia_http_v2(
                     except ValueError:
                         continue
 
-        status_pagamento = (
-            f"EM ATRASO {boletos_atr}"
-            if boletos_atr > 0
-            else ("PENDENTE" if boletos_pend > 0 else "PAGO")
-        )
+        if boletos_atr > 0:
+            status_pagamento = f"EM ATRASO {boletos_atr}"
+        else:
+            status_pagamento = "PENDENTE" if boletos_pend > 0 else "PAGO"
 
         return {
             "encontrou": True,
@@ -230,21 +265,24 @@ def consultar_adimplencia_http_v2(
             "parcelas_pagas": parcelas_pagas,
         }
 
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught
         return {"encontrou": False, "motivo": "FALHA_REDE"}
 
 
 def mapear_relatorios_via_http(sessao: requests.Session) -> dict:
+    """
+    Obtém as tabelas de contratos inativos mapeando-as em memória.
+    """
     mapa = {}
     alvos = {"1030": "CANCELADO", "11345": "DESISTENTE"}
-    sessao.headers.update(
-        {
-            "Referer": "https://intranet.consorciotradicao.com.br/autocred/LeftFrame.asp?codigo_modulo=AG"
-        }
-    )
+    url_left = "https://intranet.consorciotradicao.com.br/autocred/LeftFrame.asp?codigo_modulo=AG"
+    sessao.headers.update({"Referer": url_left})
 
     for codigo_form, status in alvos.items():
-        url_relatorio = f"https://intranet.consorciotradicao.com.br/autocred/plugins/Relatorio_Carteiras/Relatorios/relatorios.asp?Codigo_Formulario={codigo_form}"
+        url_relatorio = (
+            f"https://intranet.consorciotradicao.com.br/autocred/plugins/"
+            f"Relatorio_Carteiras/Relatorios/relatorios.asp?Codigo_Formulario={codigo_form}"
+        )
         try:
             resposta = sessao.get(url_relatorio, timeout=45)
             if (
@@ -256,17 +294,13 @@ def mapear_relatorios_via_http(sessao: requests.Session) -> dict:
                     colunas = linha.find_all("td")
                     if colunas:
                         texto_coluna = colunas[0].text.strip()
-                        match = re.match(
-                            r"^(\d{4,6})\s+(\d{3,4})\s*-\s*(\d{1,2})", texto_coluna
-                        )
+                        regex_str = r"^(\d{4,6})\s+(\d{3,4})\s*-\s*(\d{1,2})"
+                        match = re.match(regex_str, texto_coluna)
                         if match:
-                            mapa[
-                                (
-                                    int(match.group(1)),
-                                    int(match.group(2)),
-                                    int(match.group(3)),
-                                )
-                            ] = status
-        except Exception:
+                            g_id = int(match.group(1))
+                            c_id = int(match.group(2))
+                            v_id = int(match.group(3))
+                            mapa[(g_id, c_id, v_id)] = status
+        except Exception:  # pylint: disable=broad-exception-caught
             pass
     return mapa
