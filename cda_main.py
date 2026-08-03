@@ -1,9 +1,13 @@
 """
-Servidor Independente do Controle de Adimplência (CDA) - HTTP Puro (Reconstrução Zero).
-Implementa o "Aquecimento de Sessão" para simular a navegação do Selenium via rede.
+Motor Principal do Controle de Adimplência (CDA) V2.
+
+Orquestra a auditoria assíncrona dos contratos na Autocred via HTTP puro,
+gerindo o ciclo de vida da sessão e delegando a atualização das planilhas
+Google para uma fila secundária, garantindo alta performance de varredura.
 """
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 import re
 import logging
 from logging.handlers import RotatingFileHandler
@@ -40,19 +44,58 @@ logger_crm.addHandler(logging.StreamHandler())
 ESTADO_GERAL = {"ultima_sincronizacao_ram": 0, "mapa_inativos_ram": {}}
 
 
-def aquecer_sessao_asp(sessao: requests.Session):
+def tarefa_background_sheets(contrato, nome_planilha, aba_original, st_atual, pc_atual):
     """
-    O Segredo da Estabilidade: Obriga o servidor ASP a validar o nosso motor HTTP,
-    simulando o carregamento dos frames visuais que o Selenium faria naturalmente.
+    Executa a gravação no Google Sheets em segundo plano.
+
+    Abre conexões independentes para a planilha do vendedor e as planilhas gerais
+    (mensal e anual) e processa a atualização utilizando o cache O(1) do CDA.
+    O motor principal não fica bloqueado a aguardar a resolução desta thread.
+    """
+    tempo_inicio = time.time()
+    try:
+        sheet_v = conectar_google_sheets(nome_planilha, aba_original)
+        sheet_g_ano = conectar_google_sheets(f"{PREFIXO_PLANILHA}GERAL", NOME_ABA_GERAL)
+        sheet_g_mes = conectar_google_sheets(f"{PREFIXO_PLANILHA}GERAL", aba_original)
+
+        if sheet_v:
+            registrar_adimplencia_planilhas(
+                sheet_v, contrato, st_atual, pc_atual, "Ativo", 13, "Q", "S"
+            )
+        if sheet_g_ano:
+            registrar_adimplencia_planilhas(
+                sheet_g_ano, contrato, st_atual, pc_atual, "Ativo", 12, "S", "U"
+            )
+        if sheet_g_mes:
+            registrar_adimplencia_planilhas(
+                sheet_g_mes, contrato, st_atual, pc_atual, "Ativo", 12, "S", "U"
+            )
+
+        duracao = time.time() - tempo_inicio
+        logger_crm.info(
+            "    [SHEETS ASYNC] Concluído! %s gravado nas planilhas em %.3fs.",
+            contrato,
+            duracao,
+        )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger_crm.error("    [SHEETS ASYNC ERRO] Falha ao gravar %s: %s", contrato, e)
+
+
+def aquecer_sessao_asp(sessao: requests.Session) -> bool:
+    """
+    Sincroniza a sessão HTTP injetada com os frames do servidor ASP.
+
+    Garante que a intranet da Autocred regista a sessão ativa navegando
+    silenciosamente pelas estruturas primárias (MasterFrameset e LeftFrame).
     """
     try:
         url_master = (
             "https://intranet.consorciotradicao.com.br/autocred/MasterFrameset.asp"
         )
         url_left = (
-            "https://intranet.consorciotradicao.com.br/autocred/LeftFrame.asp?codigo_modulo=AG"
+            "https://intranet.consorciotradicao.com.br/autocred/"
+            "LeftFrame.asp?codigo_modulo=AG"
         )
-
         sessao.get(url_master, timeout=10)
         sessao.get(url_left, timeout=10)
         logger_crm.info(
@@ -66,23 +109,29 @@ def aquecer_sessao_asp(sessao: requests.Session):
 
 def criar_sessao_hibrida() -> requests.Session:
     """
-    Sequestra os cookies do Selenium e forja uma sessão HTTP 100% nativa.
+    Constrói uma sessão HTTP falsificando a identidade de um navegador real.
+
+    Utiliza o motor Selenium para transpor barreiras de autenticação e IA,
+    extrai os cookies de liberação e encerra a interface gráfica, devolvendo
+    uma sessão `requests` pura, estabilizada e altamente performática.
     """
     logger_crm.info("=== Iniciando Sequestro de Sessão (Híbrido - V2) ===")
     driver = iniciar_navegador()
     sessao_http = requests.Session()
 
+    mascara_agente = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+    mascara_accept = (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,*/*;q=0.8"
+    )
+
     sessao_http.headers.update(
         {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            "Accept": (
-                "text/html,application/xhtml+xml,application/xml;"
-                "q=0.9,image/avif,image/webp,*/*;q=0.8"
-            ),
+            "User-Agent": mascara_agente,
+            "Accept": mascara_accept,
         }
     )
 
@@ -93,7 +142,6 @@ def criar_sessao_hibrida() -> requests.Session:
             )
         logger_crm.info("[SUCESSO] Cookies extraídos. Destruindo interface visual.")
         driver.quit()
-
         aquecer_sessao_asp(sessao_http)
         return sessao_http
 
@@ -104,12 +152,18 @@ def criar_sessao_hibrida() -> requests.Session:
 
 def loop_reanalise_adimplencia():
     """
-    Motor principal que processa ininterruptamente a fila de clientes.
+    Loop principal ininterrupto do sistema corporativo (CDA).
+
+    Orquestra a renovação de sessões a cada 4 horas, atualiza o mapa RAM
+    de relatórios, coordena a auditoria veloz de contratos e encaminha
+    modificações financeiras para processamento assíncrono.
     """
-    logger_crm.info("=== Motor CDA (HTTP Reconstruído) Iniciado ===")
+    logger_crm.info("=== Motor CDA (HTTP Reconstruído e Assíncrono) Iniciado ===")
 
     sessao_http = criar_sessao_hibrida()
     ultimo_login = time.time()
+
+    executor_sheets = ThreadPoolExecutor(max_workers=1)
 
     while True:
         agora = time.time()
@@ -163,6 +217,7 @@ def loop_reanalise_adimplencia():
                         contrato,
                         status_ram,
                     )
+
                     sheet_v = conectar_google_sheets(
                         info["nome_planilha"], info["aba_original"]
                     )
@@ -236,7 +291,9 @@ def loop_reanalise_adimplencia():
                 " -> Analisando [%d/%d] | Contrato: %s", index, total_fila, contrato
             )
 
+            tempo_inicio_web = time.time()
             dados_rede = consultar_adimplencia_http_v2(sessao_http, contrato, info)
+            duracao_web = time.time() - tempo_inicio_web
 
             if dados_rede["encontrou"]:
                 info["ultima_verificacao"] = time.time()
@@ -262,69 +319,38 @@ def loop_reanalise_adimplencia():
                 ):
                     if recuperou_do_limbo:
                         logger_crm.info(
-                            "    [RESSURREIÇÃO] %s saiu do Limbo. Restaurando status.",
-                            contrato,
+                            "    [RESSURREIÇÃO] %s saiu do Limbo.", contrato
                         )
                     else:
                         logger_crm.info(
-                            "    [ATUALIZAÇÃO] %s -> %s. Sincronizando Sheets.",
+                            "    [ATUALIZAÇÃO] %s -> %s. Fila assíncrona...",
                             contrato,
                             fotografia,
                         )
 
-                    sheet_v = conectar_google_sheets(
-                        info["nome_planilha"], info["aba_original"]
+                    executor_sheets.submit(
+                        tarefa_background_sheets,
+                        contrato,
+                        info["nome_planilha"],
+                        info["aba_original"],
+                        st_atual,
+                        pc_atual,
                     )
-                    sheet_g_ano = conectar_google_sheets(
-                        f"{PREFIXO_PLANILHA}GERAL", NOME_ABA_GERAL
-                    )
-                    sheet_g_mes = conectar_google_sheets(
-                        f"{PREFIXO_PLANILHA}GERAL", info["aba_original"]
-                    )
-
-                    if sheet_v:
-                        registrar_adimplencia_planilhas(
-                            sheet_v, contrato, st_atual, pc_atual, "Ativo", 13, "Q", "S"
-                        )
-                    if sheet_g_ano:
-                        registrar_adimplencia_planilhas(
-                            sheet_g_ano,
-                            contrato,
-                            st_atual,
-                            pc_atual,
-                            "Ativo",
-                            12,
-                            "S",
-                            "U",
-                        )
-                    if sheet_g_mes:
-                        registrar_adimplencia_planilhas(
-                            sheet_g_mes,
-                            contrato,
-                            st_atual,
-                            pc_atual,
-                            "Ativo",
-                            12,
-                            "S",
-                            "U",
-                        )
 
                     info["ultimo_status"] = st_atual
                     info["ultimas_parcelas"] = pc_atual
                 else:
                     logger_crm.info(
-                        "    [IGUAL] %s -> %s. Evitando request no Sheets.",
-                        contrato,
-                        fotografia,
+                        "    [IGUAL] %s -> %s. Nenhuma ação.", contrato, fotografia
                     )
+
+                logger_crm.info("    [PROFILER] Tempo do Autocred: %.3fs", duracao_web)
 
             else:
                 motivo = dados_rede.get("motivo")
 
                 if motivo == "SESSAO_CAIU":
-                    logger_crm.error(
-                        "    [QUEDA] Acesso negado. O servidor encerrou a sessão HTTP."
-                    )
+                    logger_crm.error("    [QUEDA] Acesso negado. Servidor encerrou.")
                     sessao_http = None
                     break
 
@@ -333,9 +359,7 @@ def loop_reanalise_adimplencia():
                     if not info.get("data_limbo"):
                         info["data_limbo"] = time.time()
                         logger_crm.warning(
-                            "    [LIMBO NOVO] Contrato %s inacessível. -> "
-                            "[? | ? | Inacessível]",
-                            contrato,
+                            "    [LIMBO NOVO] Contrato %s inacessível.", contrato
                         )
 
                         sheet_v = conectar_google_sheets(
@@ -364,13 +388,12 @@ def loop_reanalise_adimplencia():
                         dias = int((time.time() - info["data_limbo"]) / 86400)
                         if dias > limite_dias_inativo:
                             logger_crm.error(
-                                "    [EXPIRADO] Contrato %s atingiu limite no Limbo. Revogado.",
-                                contrato,
+                                "    [EXPIRADO] Contrato %s limite atingido.", contrato
                             )
                             info["monitorar"] = False
                         else:
                             logger_crm.info(
-                                "    [LIMBO ATIVO] %s em carência (%d/%d dias).",
+                                "    [LIMBO ATIVO] %s carência (%d/%d dias).",
                                 contrato,
                                 dias,
                                 limite_dias_inativo,

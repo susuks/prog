@@ -12,6 +12,7 @@ session-sessao-media/
 
 # Credenciai, Configurações Pessoais, logs, etc...
 files/*.log
+files/*.log.*
 files/*.json
 files/sticker_pronto.webp
 files/sticker_id.txt
