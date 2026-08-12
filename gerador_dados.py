@@ -77,7 +77,7 @@ def obter_mes_utc4() -> str:
     """
     meses_pt = {
         1: "JANEIRO",
-        2: "FEVEREIRO ",
+        2: "FEVEREIRO",
         3: "MARÇO",
         4: "ABRIL",
         5: "MAIO",
@@ -85,7 +85,7 @@ def obter_mes_utc4() -> str:
         7: "JULHO",
         8: "AGOSTO",
         9: "SETEMBRO",
-        10: "OUTUBRO ",
+        10: "OUTUBRO",
         11: "NOVEMBRO",
         12: "DEZEMBRO",
     }

@@ -1,5 +1,5 @@
 """
-Módulo Exclusivo do Controle de Adimplência (CDA) - HTTP Puro (Reconstrução Zero).
+Módulo Exclusivo do Controle de Adimplência (CDA) - HTTP Puro.
 
 Extração direta de dados na intranet corporativa e orquestração de cache
 inteligente em memória RAM para otimização de consultas O(1) no Google Sheets.
@@ -196,31 +196,14 @@ def registrar_apenas_situacao_cliente(
     return False
 
 
-def validar_morte_sessao(texto_html: str) -> bool:
-    """
-    Auditoria de blocos HTML retornado, em busca de assinaturas de exclusão ASP.
-    """
-    html_min = texto_html.lower()
-    gatilhos = [
-        "acesso não permitido",
-        "j_username",
-        "senha",
-        "sessão expirou",
-        "novo login",
-        "default.asp",
-        "alert('",
-        "window.top.location",
-    ]
-    return any(gatilho in html_min for gatilho in gatilhos)
-
-
 def consultar_adimplencia_http_v2(
     sessao: requests.Session, contrato: str, info: dict
 ) -> dict:
     """
-    Algoritmo de extração estabilizado via POST Dinâmico.
-    Descarrega o formulário ASP original, mapeia os campos ocultos (Tokens/Estado)
-    e injeta os parâmetros de forma orgânica para contornar bloqueios VBScript.
+    Algoritmo Otimizado de Extração por POST Fisiológico.
+
+    Assume que a sessão já visitou 'searchCota.asp' previamente.
+    Dribla o erro de tipagem preenchendo os IDs de pesquisa numéricos com zero.
     """
     grupo_str = str(info.get("grupo")).strip()
     cota_str = str(info.get("cota")).strip()
@@ -232,68 +215,24 @@ def consultar_adimplencia_http_v2(
     cota_base = int(cota_base_str) if cota_base_str.isdigit() else 0
 
     url_base = "https://intranet.consorciotradicao.com.br/autocred"
-    url_left = f"{url_base}/LeftFrame.asp?codigo_modulo=AG"
-    url_pesquisa = (
+    url_pesq = (
         f"{url_base}/Attendance/searchCota.asp?"
         f"codigo_formulario_intranet=4&descricao_formulario_intranet=Consorciado"
     )
 
-    # 1. WARMUP
-    sessao.headers.update({"Referer": url_left})
+    payload_otimizado = {
+        "Grupo": str(grupo) if grupo > 0 else "0",
+        "Cota": str(cota_base) if cota_base > 0 else "0",
+        "cgc_cpf_cliente": "0",
+        "nome": "",
+        "NumeroContrato": str(contrato),
+        "event": "3",
+    }
+
     try:
-        res_pre = sessao.get(url_left, timeout=10)
-        if (
-            "j_username" in res_pre.text.lower()
-            or "acesso não permitido" in res_pre.text.lower()
-        ):
-            return {"encontrou": False, "motivo": "SESSAO_CAIU"}
-    except Exception:  # pylint: disable=broad-exception-caught
-        return {"encontrou": False, "motivo": "FALHA_REDE"}
-
-    # 2. RASPAGEM DO FORMULÁRIO ORIGINAL (Prevenção do Erro VBScript 800a000d)
-    try:
-        res_form = sessao.get(url_pesquisa, timeout=15)
-        html_form = res_form.text.lower()
-
-        if "j_username" in html_form or "acesso não permitido" in html_form:
-            return {"encontrou": False, "motivo": "SESSAO_CAIU"}
-
-        sopa_form = BeautifulSoup(res_form.text, "html.parser")
-        form_busca = sopa_form.find("form")
-
-        if not form_busca:
-            return {"encontrou": False, "motivo": "NAO_ENCONTRADO"}
-
-        # Extração de todos os parâmetros exigidos pelo ASP
-        payload_dinamico = {}
-        for campo in form_busca.find_all(["input", "select"]):
-            nome = campo.get("name")
-            if not nome:
-                continue
-
-            if campo.name == "select":
-                opcao = campo.find("option", selected=True)
-                if opcao:
-                    payload_dinamico[nome] = opcao.get("value", "")
-                else:
-                    primeira = campo.find("option")
-                    payload_dinamico[nome] = (
-                        primeira.get("value", "") if primeira else ""
-                    )
-            else:
-                payload_dinamico[nome] = campo.get("value", "")
-
-        # Injeção cirúrgica do contrato mantendo o ecosistema do formulário intacto
-        payload_dinamico["NumeroContrato"] = contrato
-
-    except Exception:  # pylint: disable=broad-exception-caught
-        return {"encontrou": False, "motivo": "FALHA_REDE"}
-
-    # 3. PESQUISA POST (Payload Orgânico via Dicionário)
-    try:
-        # A biblioteca requests codifica o dicionário adequadamente, prevenindo strings anómalas
+        # A sessão já está estabilizada e envia diretamente o payload
         res_post = sessao.post(
-            url_pesquisa, data=payload_dinamico, timeout=15, allow_redirects=True
+            url_pesq, data=payload_otimizado, timeout=15, allow_redirects=True
         )
         html_post = res_post.text.lower()
 
@@ -303,7 +242,6 @@ def consultar_adimplencia_http_v2(
         url_painel_atual = res_post.url
         cpf_cliente = None
 
-        # 4. TRATAMENTO DO RETORNO (Tabela ou Redirecionamento Direto)
         if "datacota.asp" in url_painel_atual.lower() or "parcelas pagas" in html_post:
             html_painel = res_post.text
             match_cpf_url = re.search(r"cgc_cpf_cliente=(\d+)", url_painel_atual)
@@ -314,6 +252,7 @@ def consultar_adimplencia_http_v2(
             linha_clicavel = sopa.find("tr", attrs={"onclick": True})
 
             if not linha_clicavel:
+                # O servidor ASP rejeitou ou não encontrou o contrato
                 return {"encontrou": False, "motivo": "NAO_ENCONTRADO"}
 
             onclick_txt = linha_clicavel["onclick"]
@@ -323,15 +262,16 @@ def consultar_adimplencia_http_v2(
                 return {"encontrou": False, "motivo": "NAO_ENCONTRADO"}
 
             url_validacao = f"{url_base}/Attendance/{match_url_clique.group(0).strip()}"
-
             match_cpf = re.search(r"cgc_cpf_cliente=(\d+)", url_validacao)
+
             if match_cpf:
                 cpf_cliente = match_cpf.group(1)
 
             if not cpf_cliente:
-                cpf_cliente = (
+                cpf_limpo = (
                     re.sub(r"\D", "", str(info.get("cpf"))) if info.get("cpf") else None
                 )
+                cpf_cliente = cpf_limpo
 
             if not cpf_cliente:
                 return {"encontrou": False, "motivo": "NAO_ENCONTRADO"}
@@ -357,7 +297,6 @@ def consultar_adimplencia_http_v2(
             ):
                 return {"encontrou": False, "motivo": "SESSAO_CAIU"}
 
-        # 5. EXTRAÇÃO DO PAINEL PRINCIPAL
         parcelas_pagas = 0
         sopa_painel = BeautifulSoup(html_painel, "html.parser")
         td_parcelas = sopa_painel.find(
@@ -371,11 +310,10 @@ def consultar_adimplencia_http_v2(
     except Exception:  # pylint: disable=broad-exception-caught
         return {"encontrou": False, "motivo": "FALHA_REDE"}
 
-    # 6. 2ª VIA DO BOLETO (Para o Status)
     desc = urllib.parse.quote("2ª Via Boleto", encoding="iso-8859-1")
     url_2via = (
-        f"{url_base}/Attendance/emissSlip.asp?"
-        f"tipo=0&cgc_cpf_cliente={cpf_cliente}&Codigo_Grupo={grupo}&Codigo_Cota={cota_base}&"
+        f"{url_base}/Attendance/emissSlip.asp?tipo=0&cgc_cpf_cliente={cpf_cliente}&"
+        f"Codigo_Grupo={grupo}&Codigo_Cota={cota_base}&"
         f"codigo_formulario_filho_intranet=67&descricao_formulario_filho_intranet={desc}"
     )
     sessao.headers.update({"Referer": url_painel_atual})
@@ -414,11 +352,10 @@ def consultar_adimplencia_http_v2(
                         except ValueError:
                             continue
 
-        status_pagamento = (
-            f"EM ATRASO {boletos_atr}"
-            if boletos_atr > 0
-            else ("PENDENTE" if boletos_pend > 0 else "PAGO")
-        )
+        if boletos_atr > 0:
+            status_pagamento = f"EM ATRASO {boletos_atr}"
+        else:
+            status_pagamento = "PENDENTE" if boletos_pend > 0 else "PAGO"
 
         return {
             "encontrou": True,
@@ -434,17 +371,21 @@ def consultar_adimplencia_http_v2(
 
 def mapear_relatorios_via_http(sessao: requests.Session) -> dict:
     """
-    Carrega o relatório financeiro consolidado de abstenção cadastral.
-
-    Acessa os diretórios de Inativos (Cancelados/Desistentes) e devolve um
-    dicionário estruturado mapeando grupos e cotas às suas respetivas falhas.
+    Descarrega o relatório de abstenção garantindo a navegação fisiológica prévia.
     """
     mapa = {}
     alvos = {"1030": "CANCELADO", "11345": "DESISTENTE"}
     url_base = "https://intranet.consorciotradicao.com.br/autocred"
-    url_left = f"{url_base}/LeftFrame.asp?codigo_modulo=AG"
-    sessao.headers.update({"Referer": url_left})
 
+    # 1. Warmup Estrito para validação do módulo de relatórios do ASP
+    url_rel_home = f"{url_base}/plugins/Relatorio_Carteiras/Relatorios/home.asp"
+    try:
+        sessao.get(url_rel_home, timeout=10)
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.error("    [RELATÓRIOS] Falha ao aceder ao menu pai dos relatórios.")
+        return mapa
+
+    # 2. Leitura dos Relatórios de Inatividade
     for codigo_form, status in alvos.items():
         url_relatorio = (
             f"{url_base}/plugins/Relatorio_Carteiras/Relatorios/"
@@ -457,6 +398,7 @@ def mapear_relatorios_via_http(sessao: requests.Session) -> dict:
                 and "j_username" not in resposta.text.lower()
             ):
                 sopa = BeautifulSoup(resposta.text, "html.parser")
+                linhas_encontradas = 0
                 for linha in sopa.find_all("tr"):
                     colunas = linha.find_all("td")
                     if colunas:
@@ -468,6 +410,17 @@ def mapear_relatorios_via_http(sessao: requests.Session) -> dict:
                             c_id = int(match.group(2))
                             v_id = int(match.group(3))
                             mapa[(g_id, c_id, v_id)] = status
-        except Exception:  # pylint: disable=broad-exception-caught
-            pass
+                            linhas_encontradas += 1
+                logger.info(
+                    "    [RELATÓRIOS] Form %s carregado. Encontrados %d inativos válidos.",
+                    codigo_form,
+                    linhas_encontradas,
+                )
+            else:
+                logger.warning(
+                    "    [RELATÓRIOS] Acesso rejeitado ao formulário %s.", codigo_form
+                )
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.error("    [RELATÓRIOS] Erro ao descarregar %s: %s", codigo_form, e)
+
     return mapa

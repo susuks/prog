@@ -11,8 +11,7 @@ venv/
 session-sessao-media/
 
 # Credenciai, Configurações Pessoais, logs, etc...
-files/*.log
-files/*.log.*
+files/*.log*
 files/*.json
 files/sticker_pronto.webp
 files/sticker_id.txt
@@ -21,8 +20,5 @@ files/vendedores.csv
 files/vendedores enc.csv
 files/historico_concluidos.csv
 files/*.html
-
-
-# Arquivos do sistema
-.DS_Store
-Thumbs.db
+/importador_cda.py
+/coletor_manual.py

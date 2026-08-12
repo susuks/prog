@@ -1,16 +1,16 @@
 """
 Motor Principal do Controle de Adimplência (CDA) V2.
 
-Orquestra a auditoria assíncrona dos contratos na Autocred via HTTP puro,
-gerindo o ciclo de vida da sessão e delegando a atualização das planilhas
-Google para uma fila secundária, garantindo alta performance de varredura.
+Orquestra a auditoria sequencial veloz na Autocred via HTTP puro,
+acumulando as respostas em buffers de memória e disparando as atualizações
+para o Google Sheets em Lotes (Batch Update), obliterando a latência da API.
 """
 
 import time
-from concurrent.futures import ThreadPoolExecutor
 import re
 import logging
 from logging.handlers import RotatingFileHandler
+from concurrent.futures import ThreadPoolExecutor
 import requests
 
 from cda_modulos import (
@@ -18,8 +18,8 @@ from cda_modulos import (
     salvar_adimplencia,
     consultar_adimplencia_http_v2,
     mapear_relatorios_via_http,
-    registrar_adimplencia_planilhas,
     registrar_apenas_situacao_cliente,
+    cache_cda,
 )
 
 from gerador_dados import (
@@ -35,7 +35,10 @@ log_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 logger_crm = logging.getLogger("EnterpriseCRM")
 logger_crm.setLevel(logging.INFO)
 handler_crm = RotatingFileHandler(
-    "files/crm_sistema.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    "files/crm_sistema.log",
+    maxBytes=5 * 1024 * 1024,
+    backupCount=3,
+    encoding="utf-8",
 )
 handler_crm.setFormatter(log_formatter)
 logger_crm.addHandler(handler_crm)
@@ -44,49 +47,78 @@ logger_crm.addHandler(logging.StreamHandler())
 ESTADO_GERAL = {"ultima_sincronizacao_ram": 0, "mapa_inativos_ram": {}}
 
 
-def tarefa_background_sheets(contrato, nome_planilha, aba_original, st_atual, pc_atual):
+def tarefa_background_lote(lote_dados):
     """
-    Executa a gravação no Google Sheets em segundo plano.
-
-    Abre conexões independentes para a planilha do vendedor e as planilhas gerais
-    (mensal e anual) e processa a atualização utilizando o cache O(1) do CDA.
-    O motor principal não fica bloqueado a aguardar a resolução desta thread.
+    Descarrega um lote massivo de atualizações para o Google Sheets.
+    Agrupa os dados por Planilha/Aba para abrir a conexão apenas uma vez por
+    alvo, e utiliza a função 'batch_update' para escrever tudo numa só chamada.
     """
     tempo_inicio = time.time()
-    try:
-        sheet_v = conectar_google_sheets(nome_planilha, aba_original)
-        sheet_g_ano = conectar_google_sheets(f"{PREFIXO_PLANILHA}GERAL", NOME_ABA_GERAL)
-        sheet_g_mes = conectar_google_sheets(f"{PREFIXO_PLANILHA}GERAL", aba_original)
 
-        if sheet_v:
-            registrar_adimplencia_planilhas(
-                sheet_v, contrato, st_atual, pc_atual, "Ativo", 13, "Q", "S"
-            )
-        if sheet_g_ano:
-            registrar_adimplencia_planilhas(
-                sheet_g_ano, contrato, st_atual, pc_atual, "Ativo", 12, "S", "U"
-            )
-        if sheet_g_mes:
-            registrar_adimplencia_planilhas(
-                sheet_g_mes, contrato, st_atual, pc_atual, "Ativo", 12, "S", "U"
-            )
+    mapa_vendedor = {}
+    mapa_geral_mes = {}
+    mapa_geral_ano = {}
+
+    for item in lote_dados:
+        cv = (item["nome_planilha"], item["aba_original"])
+        mapa_vendedor.setdefault(cv, []).append(item)
+
+        cgm = (f"{PREFIXO_PLANILHA}GERAL", item["aba_original"])
+        mapa_geral_mes.setdefault(cgm, []).append(item)
+
+        cga = (f"{PREFIXO_PLANILHA}GERAL", NOME_ABA_GERAL)
+        mapa_geral_ano.setdefault(cga, []).append(item)
+
+    try:
+
+        def processar_agrupamento(agrupamento, col_busca, col_inicio, col_fim):
+            for (nome, aba), itens in agrupamento.items():
+                if not nome or not aba:
+                    continue
+                sheet = conectar_google_sheets(nome, aba)
+                if not sheet:
+                    continue
+
+                payload_batch = []
+                for it in itens:
+                    linha = cache_cda.obter_linha(sheet, it["contrato"], col_busca)
+                    if linha:
+                        payload_batch.append(
+                            {
+                                "range": f"{col_inicio}{linha}:{col_fim}{linha}",
+                                "values": [
+                                    [
+                                        str(it["status_pgto"]),
+                                        int(it["parcelas"]),
+                                        str(it["status_cliente"]),
+                                    ]
+                                ],
+                            }
+                        )
+
+                if payload_batch:
+                    sheet.batch_update(payload_batch, value_input_option="USER_ENTERED")
+                    time.sleep(1)
+
+        processar_agrupamento(mapa_vendedor, 13, "Q", "S")
+        processar_agrupamento(mapa_geral_mes, 12, "S", "U")
+        processar_agrupamento(mapa_geral_ano, 12, "S", "U")
 
         duracao = time.time() - tempo_inicio
         logger_crm.info(
-            "    [SHEETS ASYNC] Concluído! %s gravado nas planilhas em %.3fs.",
-            contrato,
+            "    [SHEETS BATCH] Lote de %d contratos sincronizado massivamente "
+            "em %.2fs.",
+            len(lote_dados),
             duracao,
         )
+
     except Exception as e:  # pylint: disable=broad-exception-caught
-        logger_crm.error("    [SHEETS ASYNC ERRO] Falha ao gravar %s: %s", contrato, e)
+        logger_crm.error("    [SHEETS BATCH ERRO] Falha ao processar o lote: %s", e)
 
 
 def aquecer_sessao_asp(sessao: requests.Session) -> bool:
     """
     Sincroniza a sessão HTTP injetada com os frames do servidor ASP.
-
-    Garante que a intranet da Autocred regista a sessão ativa navegando
-    silenciosamente pelas estruturas primárias (MasterFrameset e LeftFrame).
     """
     try:
         url_master = (
@@ -96,11 +128,17 @@ def aquecer_sessao_asp(sessao: requests.Session) -> bool:
             "https://intranet.consorciotradicao.com.br/autocred/"
             "LeftFrame.asp?codigo_modulo=AG"
         )
+        url_pesq = (
+            "https://intranet.consorciotradicao.com.br/autocred/Attendance/"
+            "searchCota.asp?codigo_formulario_intranet=4&"
+            "descricao_formulario_intranet=Consorciado"
+        )
+
         sessao.get(url_master, timeout=10)
         sessao.get(url_left, timeout=10)
-        logger_crm.info(
-            "[SISTEMA] Sessão HTTP aquecida com sucesso (Estado ASP sincronizado)."
-        )
+        sessao.get(url_pesq, timeout=10)
+
+        logger_crm.info("[SISTEMA] Sessão HTTP aquecida com validação de módulo ASP.")
         return True
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger_crm.error("[SISTEMA] Falha ao aquecer a sessão: %s", e)
@@ -110,10 +148,6 @@ def aquecer_sessao_asp(sessao: requests.Session) -> bool:
 def criar_sessao_hibrida() -> requests.Session:
     """
     Constrói uma sessão HTTP falsificando a identidade de um navegador real.
-
-    Utiliza o motor Selenium para transpor barreiras de autenticação e IA,
-    extrai os cookies de liberação e encerra a interface gráfica, devolvendo
-    uma sessão `requests` pura, estabilizada e altamente performática.
     """
     logger_crm.info("=== Iniciando Sequestro de Sessão (Híbrido - V2) ===")
     driver = iniciar_navegador()
@@ -121,7 +155,8 @@ def criar_sessao_hibrida() -> requests.Session:
 
     mascara_agente = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
     )
     mascara_accept = (
         "text/html,application/xhtml+xml,application/xml;q=0.9,"
@@ -140,7 +175,7 @@ def criar_sessao_hibrida() -> requests.Session:
             sessao_http.cookies.set(
                 cookie["name"], cookie["value"], domain=cookie["domain"]
             )
-        logger_crm.info("[SUCESSO] Cookies extraídos. Destruindo interface visual.")
+        logger_crm.info("[SUCESSO] Cookies extraídos. Destruindo a interface.")
         driver.quit()
         aquecer_sessao_asp(sessao_http)
         return sessao_http
@@ -153,12 +188,8 @@ def criar_sessao_hibrida() -> requests.Session:
 def loop_reanalise_adimplencia():
     """
     Loop principal ininterrupto do sistema corporativo (CDA).
-
-    Orquestra a renovação de sessões a cada 4 horas, atualiza o mapa RAM
-    de relatórios, coordena a auditoria veloz de contratos e encaminha
-    modificações financeiras para processamento assíncrono.
     """
-    logger_crm.info("=== Motor CDA (HTTP Reconstruído e Assíncrono) Iniciado ===")
+    logger_crm.info("=== Motor CDA (Estabilizado e Fisiológico) Iniciado ===")
 
     sessao_http = criar_sessao_hibrida()
     ultimo_login = time.time()
@@ -181,11 +212,11 @@ def loop_reanalise_adimplencia():
 
         if agora - ESTADO_GERAL["ultima_sincronizacao_ram"] >= intervalo_sinc:
             logger_crm.info(
-                "[OFFLINE] Atualizando base de Cancelados/Desistentes na RAM..."
+                "[OFFLINE] Sincronizando relatórios de Cancelados/Desistentes..."
             )
             ESTADO_GERAL["mapa_inativos_ram"] = mapear_relatorios_via_http(sessao_http)
             logger_crm.info(
-                "[OFFLINE] RAM Sincronizada. %d contratos.",
+                "[OFFLINE] RAM Populada. Total de %d contratos inativados.",
                 len(ESTADO_GERAL["mapa_inativos_ram"]),
             )
             ESTADO_GERAL["ultima_sincronizacao_ram"] = time.time()
@@ -198,6 +229,8 @@ def loop_reanalise_adimplencia():
         mudou_json = False
         mapa_ram = ESTADO_GERAL["mapa_inativos_ram"]
         fila_online = []
+
+        buffer_inativos = []
 
         for contrato, info in adimplencia.items():
             cota_versao = info.get("cota_versao")
@@ -213,54 +246,21 @@ def loop_reanalise_adimplencia():
 
                 if status_ram:
                     logger_crm.warning(
-                        "[MUDANÇA DE ESTADO] Contrato %s classificado %s (RAM).",
+                        "[MUDANÇA] Contrato %s classificado %s via Filtro RAM.",
                         contrato,
                         status_ram,
                     )
 
-                    sheet_v = conectar_google_sheets(
-                        info["nome_planilha"], info["aba_original"]
+                    buffer_inativos.append(
+                        {
+                            "contrato": contrato,
+                            "nome_planilha": info["nome_planilha"],
+                            "aba_original": info["aba_original"],
+                            "status_pgto": "CANCELADO/DESIST",
+                            "parcelas": 0,
+                            "status_cliente": status_ram,
+                        }
                     )
-                    sheet_g_ano = conectar_google_sheets(
-                        f"{PREFIXO_PLANILHA}GERAL", NOME_ABA_GERAL
-                    )
-                    sheet_g_mes = conectar_google_sheets(
-                        f"{PREFIXO_PLANILHA}GERAL", info["aba_original"]
-                    )
-
-                    if sheet_v:
-                        registrar_adimplencia_planilhas(
-                            sheet_v,
-                            contrato,
-                            "CANCELADO/DESIST",
-                            0,
-                            status_ram,
-                            13,
-                            "Q",
-                            "S",
-                        )
-                    if sheet_g_ano:
-                        registrar_adimplencia_planilhas(
-                            sheet_g_ano,
-                            contrato,
-                            "CANCELADO/DESIST",
-                            0,
-                            status_ram,
-                            12,
-                            "S",
-                            "U",
-                        )
-                    if sheet_g_mes:
-                        registrar_adimplencia_planilhas(
-                            sheet_g_mes,
-                            contrato,
-                            "CANCELADO/DESIST",
-                            0,
-                            status_ram,
-                            12,
-                            "S",
-                            "U",
-                        )
 
                     info["monitorar"] = False
                     info["ultimo_status"] = "CANCELADO/DESIST"
@@ -271,6 +271,9 @@ def loop_reanalise_adimplencia():
                 ultima_verificacao = info.get("ultima_verificacao", 0)
                 if (agora - ultima_verificacao) >= intervalo_reanalise:
                     fila_online.append((ultima_verificacao, contrato, info))
+
+        if buffer_inativos:
+            executor_sheets.submit(tarefa_background_lote, buffer_inativos.copy())
 
         if mudou_json:
             salvar_adimplencia(adimplencia)
@@ -283,8 +286,13 @@ def loop_reanalise_adimplencia():
             continue
 
         logger_crm.info(
-            "[ONLINE] Fila HTTP pronta: %d contratos aguardam auditoria.", total_fila
+            "[ONLINE] Fila HTTP pronta: %d contratos aguardam auditoria.",
+            total_fila,
         )
+
+        buffer_atualizacoes = []
+        tempo_ultimo_lote = time.time()
+        tamanho_lote = 20
 
         for index, (_, contrato, info) in enumerate(fila_online, start=1):
             logger_crm.info(
@@ -323,18 +331,20 @@ def loop_reanalise_adimplencia():
                         )
                     else:
                         logger_crm.info(
-                            "    [ATUALIZAÇÃO] %s -> %s. Fila assíncrona...",
+                            "    [ATUALIZAÇÃO] %s -> %s. Adicionado ao cesto...",
                             contrato,
                             fotografia,
                         )
 
-                    executor_sheets.submit(
-                        tarefa_background_sheets,
-                        contrato,
-                        info["nome_planilha"],
-                        info["aba_original"],
-                        st_atual,
-                        pc_atual,
+                    buffer_atualizacoes.append(
+                        {
+                            "contrato": contrato,
+                            "nome_planilha": info["nome_planilha"],
+                            "aba_original": info["aba_original"],
+                            "status_pgto": st_atual,
+                            "parcelas": pc_atual,
+                            "status_cliente": "Ativo",
+                        }
                     )
 
                     info["ultimo_status"] = st_atual
@@ -350,7 +360,7 @@ def loop_reanalise_adimplencia():
                 motivo = dados_rede.get("motivo")
 
                 if motivo == "SESSAO_CAIU":
-                    logger_crm.error("    [QUEDA] Acesso negado. Servidor encerrou.")
+                    logger_crm.error("    [QUEDA] Acesso negado. Servidor caiu.")
                     sessao_http = None
                     break
 
@@ -362,33 +372,17 @@ def loop_reanalise_adimplencia():
                             "    [LIMBO NOVO] Contrato %s inacessível.", contrato
                         )
 
-                        sheet_v = conectar_google_sheets(
+                        sheet_morta = conectar_google_sheets(
                             info["nome_planilha"], info["aba_original"]
                         )
-                        sheet_g_ano = conectar_google_sheets(
-                            f"{PREFIXO_PLANILHA}GERAL", NOME_ABA_GERAL
+                        registrar_apenas_situacao_cliente(
+                            sheet_morta, contrato, "Inacessível", 13, 19
                         )
-                        sheet_g_mes = conectar_google_sheets(
-                            f"{PREFIXO_PLANILHA}GERAL", info["aba_original"]
-                        )
-
-                        if sheet_v:
-                            registrar_apenas_situacao_cliente(
-                                sheet_v, contrato, "Inacessível", 13, 19
-                            )
-                        if sheet_g_ano:
-                            registrar_apenas_situacao_cliente(
-                                sheet_g_ano, contrato, "Inacessível", 12, 21
-                            )
-                        if sheet_g_mes:
-                            registrar_apenas_situacao_cliente(
-                                sheet_g_mes, contrato, "Inacessível", 12, 21
-                            )
                     else:
                         dias = int((time.time() - info["data_limbo"]) / 86400)
                         if dias > limite_dias_inativo:
                             logger_crm.error(
-                                "    [EXPIRADO] Contrato %s limite atingido.", contrato
+                                "    [EXPIRADO] Contrato %s atingiu limite.", contrato
                             )
                             info["monitorar"] = False
                         else:
@@ -399,10 +393,31 @@ def loop_reanalise_adimplencia():
                                 limite_dias_inativo,
                             )
 
+            condicao_tempo = (time.time() - tempo_ultimo_lote) > 60
+            if len(buffer_atualizacoes) >= tamanho_lote or condicao_tempo:
+                if buffer_atualizacoes:
+                    logger_crm.info(
+                        "    [DISPARO] Enviando lote com %d atualizações...",
+                        len(buffer_atualizacoes),
+                    )
+                    executor_sheets.submit(
+                        tarefa_background_lote, buffer_atualizacoes.copy()
+                    )
+                    buffer_atualizacoes.clear()
+                tempo_ultimo_lote = time.time()
+
             bd_atual = carregar_adimplencia()
             if contrato in bd_atual:
                 bd_atual[contrato].update(info)
             salvar_adimplencia(bd_atual)
+
+        if buffer_atualizacoes:
+            logger_crm.info(
+                "    [DISPARO FINAL] Enviando últimos %d contratos...",
+                len(buffer_atualizacoes),
+            )
+            executor_sheets.submit(tarefa_background_lote, buffer_atualizacoes.copy())
+            buffer_atualizacoes.clear()
 
 
 if __name__ == "__main__":
