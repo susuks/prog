@@ -244,21 +244,35 @@ def salvar_historico_concluido(
 # ============================================================================
 # COMUNICAÇÃO COM GOOGLE SHEETS E CACHE DE IDs
 # ============================================================================
+_ESTADO_CONEXAO = {"cliente_gspread": None}
+
+
+def obter_cliente_gspread():
+    """Garante que a autenticação no Google é feita apenas 1 vez por sessão."""
+    if _ESTADO_CONEXAO["cliente_gspread"] is None:
+        scope = [
+            "https://spreadsheets.google.com/feeds",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        try:
+            creds = ServiceAccountCredentials.from_json_keyfile_name(
+                "files/credentials.json", scope
+            )
+            _ESTADO_CONEXAO["cliente_gspread"] = gspread.authorize(creds)
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.error(
+                "   [ERRO CREDENCIAIS] Falha ao autorizar Google Sheets: %s", e
+            )
+
+    return _ESTADO_CONEXAO["cliente_gspread"]
+
+
 def conectar_google_sheets(nome_planilha: str, aba: str):
     """
-    Estabelece uma conexão autenticada via API com uma planilha e aba específica.
+    Estabelece uma conexão com uma planilha utilizando um cliente global persistente.
     """
-    scope = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    try:
-        creds = ServiceAccountCredentials.from_json_keyfile_name(
-            "files/credentials.json", scope
-        )
-        cliente = gspread.authorize(creds)
-    except Exception as e:  # pylint: disable=broad-exception-caught
-        logger.error("   [ERRO CREDENCIAIS] Falha ao autorizar Google Sheets: %s", e)
+    cliente = obter_cliente_gspread()
+    if not cliente:
         return None
 
     cache = {}
@@ -303,18 +317,38 @@ def conectar_google_sheets(nome_planilha: str, aba: str):
 def encontrar_proxima_linha_vazia(sheet, start_row: int, check_col: int) -> int:
     """
     Varre verticalmente uma coluna chave para encontrar a primeira célula vazia.
+    Se o limite físico da planilha for atingido, expande a grade automaticamente.
     """
     coluna_alvo = sheet.col_values(check_col)
-    if len(coluna_alvo) < start_row:
-        return start_row
+    linha_vazia = start_row
 
-    for i in range(start_row - 1, len(coluna_alvo) + 20):
-        try:
-            if i >= len(coluna_alvo) or not coluna_alvo[i]:
-                return i + 1
-        except Exception:  # pylint: disable=broad-exception-caught
-            return i + 1
-    return start_row
+    # 1. Encontra a próxima linha disponível
+    if len(coluna_alvo) >= start_row:
+        for i in range(start_row - 1, len(coluna_alvo)):
+            if not str(coluna_alvo[i]).strip():
+                linha_vazia = i + 1
+                break
+        else:
+            linha_vazia = len(coluna_alvo) + 1
+
+    # 2. Expansão Dinâmica da Grade (Prevenção de Colapso Out-of-Bounds)
+    try:
+        # Se a linha de destino ultrapassar o limite atual da folha...
+        if linha_vazia > sheet.row_count:
+            sheet.add_rows(500)  # Adiciona um lote de 500 linhas para criar margem
+            logger.info(
+                "   [EXPANSÃO] O limite da aba '%s' foi atingido. "
+                "Grade expandida em +500 linhas automaticamente.",
+                sheet.title,
+            )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.warning(
+            "   [AVISO] Falha ao verificar/expandir os limites da aba '%s': %s",
+            sheet.title,
+            e,
+        )
+
+    return linha_vazia
 
 
 def encontrar_linha_do_contrato(sheet, contrato: str, col_idx: int) -> int:
@@ -391,10 +425,12 @@ def atualizar_planilha_geral(
     sheet, row_csv: dict, dados_site: dict, contrato: str
 ) -> str:
     """
-    Compila os dados raspados e injeta na planilha GERAL (Gestão Centralizada).
-    Adiciona a data de registro na coluna R.
+    Compila os dados raspados e injeta na matriz unificada da planilha GERAL.
+    O sistema ignora as abas mensais extintas, mas preserva rigorosamente
+    o registo da Data de Adição (Coluna R) para os cálculos de KPI do painel.
     """
-    linha = encontrar_proxima_linha_vazia(sheet, start_row=7, check_col=3)
+    # Procura linha vazia a partir da linha 2 (pois o cabeçalho subiu) na coluna C (Data Venda)
+    linha = encontrar_proxima_linha_vazia(sheet, start_row=2, check_col=3)
     status_pag = "1º Parcela Paga" if dados_site.get("pago") else ""
 
     telefone_limpo = re.sub(r"\D", "", str(dados_site.get("telefone", "")))
@@ -419,6 +455,7 @@ def atualizar_planilha_geral(
     except (ValueError, TypeError):
         pass
 
+    # Restauração do Fuso Horário de Campo Grande para a Coluna R
     fuso_utc4 = timezone(timedelta(hours=-4))
     data_registro_atual = datetime.now(fuso_utc4).strftime("%d/%m/%Y")
 
@@ -432,7 +469,7 @@ def atualizar_planilha_geral(
         str(dados_site.get("estado", "")),
         str(dados_site.get("cpf", "")),
         str(row_csv.get("vendedor", "")),
-        data_registro_atual,  # Coluna R
+        data_registro_atual,  # Coluna R preservada
     ]
 
     sheet.update_cell(linha, 1, status_pag)
@@ -441,7 +478,7 @@ def atualizar_planilha_geral(
         values=[dados_cadastrais],
         value_input_option="USER_ENTERED",
     )
-    # Extensão do intervalo até à coluna R
+    # Extensão do intervalo restaurada até à coluna R
     sheet.update(
         range_name=f"I{linha}:R{linha}",
         values=[dados_financeiros],

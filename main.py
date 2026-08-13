@@ -75,8 +75,6 @@ ESTADO = {"autenticado": False, "ultimo_keep_alive": time.time(), "ultimo_login"
 def garantir_sessao():
     """
     Verifica a integridade da sessão web e garante o ciclo de 4 horas.
-    Caso o portal esteja desconectado ou o tempo tenha expirado, aciona a
-    rotina de Inteligência Artificial para efetuar um novo login na página inicial.
     """
     agora = time.time()
     precisa_relogin = (agora - ESTADO.get("ultimo_login", 0)) > 14400
@@ -101,11 +99,11 @@ def garantir_sessao():
 # ROTA DA API (RECEPÇÃO DE PEDIDOS DO NODE.JS)
 # ============================================================================
 @app.route("/processar_venda", methods=["POST"])
-@app.route("/processar_venda", methods=["POST"])
 def processar_venda():
     """
     Endpoint HTTP POST. Realiza a validação do Bearer Token, previne a
     duplicidade de contratos e comanda o motor Selenium.
+    Fase 2: Grava apenas no Vendedor e na GERAL (Matriz 2026).
     """
     auth_header = request.headers.get("Authorization")
     if auth_header != TOKEN_API_ESPERADO:
@@ -142,7 +140,7 @@ def processar_venda():
             jsonify(
                 {
                     "erro": "duplicidade",
-                    "mensagem": f"O contrato {contrato} já foi processado e gravado anteriormente no sistema.",
+                    "mensagem": f"O contrato {contrato} já foi gravado no sistema.",
                 }
             ),
             409,
@@ -158,7 +156,6 @@ def processar_venda():
             sheet_geral_ano = conectar_google_sheets(
                 nome_planilha_geral, NOME_ABA_GERAL
             )
-            sheet_geral_mes = conectar_google_sheets(nome_planilha_geral, aba_atual)
 
             erros_infra = []
             if not sheet_vend:
@@ -167,11 +164,9 @@ def processar_venda():
                 )
             if not sheet_geral_ano:
                 erros_infra.append(f"Planilha GERAL -> Aba: {NOME_ABA_GERAL}")
-            if not sheet_geral_mes:
-                erros_infra.append(f"Planilha GERAL -> Aba: {aba_atual}")
 
             if erros_infra:
-                msg_erro = f"Infraestrutura inválida. Não foi possível localizar: {', '.join(erros_infra)}."
+                msg_erro = f"Infraestrutura inválida. Falta: {', '.join(erros_infra)}."
                 logger.error("[ERRO INFRAESTRUTURA] %s", msg_erro)
                 return jsonify({"erro": "planilha_ausente", "mensagem": msg_erro}), 404
 
@@ -181,7 +176,7 @@ def processar_venda():
             encontrou_contrato = buscar_contrato(driver_global, contrato)
             if not encontrou_contrato:
                 logger.warning(
-                    "Contrato %s não localizado. Acionando contingência de re-login na API...",
+                    "Contrato %s não localizado. Acionando re-login na API...",
                     contrato,
                 )
                 ESTADO["autenticado"] = False
@@ -193,7 +188,6 @@ def processar_venda():
 
                 anotou_vend = False
                 anotou_geral_ano = False
-                anotou_geral_mes = False
 
                 try:
                     atualizar_planilha_vendedor(sheet_vend, dados, dados_site, contrato)
@@ -216,20 +210,7 @@ def processar_venda():
                         e_geral_ano,
                     )
 
-                try:
-                    atualizar_planilha_geral(
-                        sheet_geral_mes, dados, dados_site, contrato
-                    )
-                    anotou_geral_mes = True
-                except (
-                    Exception  # pylint: disable=broad-exception-caught
-                ) as e_geral_mes:
-                    logger.error(
-                        "Falha na gravação da planilha GERAL (Aba Mensal): %s",
-                        e_geral_mes,
-                    )
-
-                if anotou_vend and anotou_geral_ano and anotou_geral_mes:
+                if anotou_vend and anotou_geral_ano:
                     texto_st = (
                         "1º Parcela Paga"
                         if dados_site.get("pago")
@@ -245,7 +226,7 @@ def processar_venda():
                     )
 
                     logger.info(
-                        "[SUCESSO API] Contrato %s gravado com sucesso em todas as planilhas e abas.",
+                        "[SUCESSO API] Contrato %s gravado com sucesso no sistema.",
                         contrato,
                     )
 
@@ -264,7 +245,6 @@ def processar_venda():
                             contrato,
                         )
                     else:
-                        # [PONTE CDA] Contrato pago na hora vai direto para monitorização do CRM
                         migrar_para_adimplencia(
                             contrato,
                             {
@@ -297,10 +277,8 @@ def processar_venda():
                         erros_gravacao.append("Planilha do Vendedor")
                     if not anotou_geral_ano:
                         erros_gravacao.append("Planilha GERAL (Aba Anual)")
-                    if not anotou_geral_mes:
-                        erros_gravacao.append("Planilha GERAL (Aba Mensal)")
 
-                    msg_falha = f"Falha na gravação física dos dados. Erro ao atualizar: {', '.join(erros_gravacao)}."
+                    msg_falha = f"Falha na gravação física. Erro em: {', '.join(erros_gravacao)}."
                     logger.error("[ERRO GRAVAÇÃO] %s", msg_falha)
                     return (
                         jsonify({"erro": "falha_gravacao", "mensagem": msg_falha}),
@@ -308,14 +286,14 @@ def processar_venda():
                     )
 
             logger.error(
-                "API RECUSADA | Contrato %s definitivamente não localizado após contingência.",
+                "API RECUSADA | Contrato %s definitivamente não localizado.",
                 contrato,
             )
             return (
                 jsonify(
                     {
                         "erro": "contrato_nao_encontrado",
-                        "mensagem": f"O contrato {contrato} não foi localizado no portal Autocred.",
+                        "mensagem": f"O contrato {contrato} não foi localizado.",
                     }
                 ),
                 404,
@@ -340,7 +318,7 @@ def processar_venda():
 def loop_reanalise_background():
     """
     Rotina em segundo plano. Varre a fila de contratos e executa
-    a atualização garantida caso o pagamento seja detetado.
+    a atualização caso o pagamento seja detetado (Fase 2: Ignora GERAL Mensal).
     """
     logger.info("Motor de Reanálise Independente Iniciado.")
 
@@ -369,7 +347,7 @@ def loop_reanalise_background():
 
                     if agora - data_inclusao > 2592000:
                         logger.warning(
-                            "EXPIROU | Contrato %s atingiu o prazo máximo de 30 dias sem pagamento. Removido.",
+                            "EXPIROU | Contrato %s atingiu limite de 30 dias. Removido.",
                             contrato,
                         )
                         del pendentes[contrato]
@@ -389,7 +367,7 @@ def loop_reanalise_background():
                     encontrou_contrato = buscar_contrato(driver_global, contrato)
                     if not encontrou_contrato:
                         logger.warning(
-                            "Contrato %s não encontrado na reanálise. Acionando contingência de re-login...",
+                            "Contrato %s não encontrado. Acionando re-login...",
                             contrato,
                         )
                         ESTADO["autenticado"] = False
@@ -399,26 +377,19 @@ def loop_reanalise_background():
                     if encontrou_contrato:
                         if verificar_apenas_pagamento(driver_global):
                             logger.info(
-                                "PAGAMENTO DETECTADO | Atualizando status do contrato %s.",
-                                contrato,
+                                "PAGAMENTO DETECTADO | Atualizando %s.", contrato
                             )
 
-                            # Extração completa para capturar Grupo e Cota e entregar ao CDA
                             dados_completos = extrair_dados_completos(driver_global)
                             aba_salva = info.get("aba_original", obter_mes_utc4())
 
-                            # Conecta as planilhas (o conectar_google_sheets cuida do log em caso de erro na infraestrutura)
                             sheet_v = conectar_google_sheets(
                                 info["nome_planilha"], aba_salva
                             )
                             sheet_g_ano = conectar_google_sheets(
                                 f"{PREFIXO_PLANILHA}GERAL", NOME_ABA_GERAL
                             )
-                            sheet_g_mes = conectar_google_sheets(
-                                f"{PREFIXO_PLANILHA}GERAL", aba_salva
-                            )
 
-                            # [1] Busca e atualiza na Planilha do Vendedor
                             if sheet_v:
                                 l_v = encontrar_linha_do_contrato(
                                     sheet_v, contrato, col_idx=13
@@ -426,19 +397,18 @@ def loop_reanalise_background():
                                 if l_v:
                                     try:
                                         sheet_v.update_cell(l_v, 2, "1º Parcela Paga")
-                                    except Exception as e:  # pylint: disable=broad-exception-caught
+                                    except (
+                                        Exception  # pylint: disable=broad-exception-caught
+                                    ) as e:
                                         logger.error(
-                                            "Falha ao gravar na planilha do Vendedor: %s",
-                                            e,
+                                            "Falha na planilha Vendedor: %s", e
                                         )
                                 else:
                                     logger.warning(
-                                        "Contrato %s não encontrado na aba '%s' do Vendedor.",
+                                        "Contrato %s não encontrado no Vendedor.",
                                         contrato,
-                                        aba_salva,
                                     )
 
-                            # [2] Busca e atualiza na Planilha GERAL (Aba do Ano)
                             if sheet_g_ano:
                                 l_g_ano = encontrar_linha_do_contrato(
                                     sheet_g_ano, contrato, col_idx=12
@@ -448,41 +418,15 @@ def loop_reanalise_background():
                                         sheet_g_ano.update_cell(
                                             l_g_ano, 1, "1º Parcela Paga"
                                         )
-                                    except Exception as e:  # pylint: disable=broad-exception-caught
-                                        logger.error(
-                                            "Falha ao gravar na planilha GERAL (Ano): %s",
-                                            e,
-                                        )
+                                    except (
+                                        Exception  # pylint: disable=broad-exception-caught
+                                    ) as e:
+                                        logger.error("Falha na planilha GERAL: %s", e)
                                 else:
                                     logger.warning(
-                                        "Contrato %s não encontrado na aba '%s' da GERAL.",
-                                        contrato,
-                                        NOME_ABA_GERAL,
+                                        "Contrato %s não encontrado na GERAL.", contrato
                                     )
 
-                            # [3] Busca e atualiza na Planilha GERAL (Aba do Mês)
-                            if sheet_g_mes:
-                                l_g_mes = encontrar_linha_do_contrato(
-                                    sheet_g_mes, contrato, col_idx=12
-                                )
-                                if l_g_mes:
-                                    try:
-                                        sheet_g_mes.update_cell(
-                                            l_g_mes, 1, "1º Parcela Paga"
-                                        )
-                                    except Exception as e:  # pylint: disable=broad-exception-caught
-                                        logger.error(
-                                            "Falha ao gravar na planilha GERAL (Mês): %s",
-                                            e,
-                                        )
-                                else:
-                                    logger.warning(
-                                        "Contrato %s não encontrado na aba '%s' da GERAL.",
-                                        contrato,
-                                        aba_salva,
-                                    )
-
-                            # [4] Limpeza Forçada da Fila Curta
                             salvar_historico_concluido(
                                 contrato,
                                 info["nome_planilha"],
@@ -491,7 +435,6 @@ def loop_reanalise_background():
                                 "1º Parcela Paga (Reanálise)",
                             )
 
-                            # [PONTE CDA] Transfere o cliente limpo para a base longa do CRM
                             migrar_para_adimplencia(
                                 contrato,
                                 info,
@@ -501,13 +444,13 @@ def loop_reanalise_background():
 
                             del pendentes[contrato]
                             logger.info(
-                                "[SUCESSO REANÁLISE] Contrato %s concluído e transferido ao CDA.",
+                                "[SUCESSO REANÁLISE] Contrato %s transferido ao CDA.",
                                 contrato,
                             )
 
                     else:
                         logger.warning(
-                            "NÃO ENCONTRADO | Cota %s definitivamente indisponível após contingência. Removida da fila.",
+                            "NÃO ENCONTRADO | Cota %s indisponível. Removida da fila.",
                             contrato,
                         )
                         del pendentes[contrato]

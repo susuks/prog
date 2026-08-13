@@ -371,7 +371,8 @@ def consultar_adimplencia_http_v2(
 
 def mapear_relatorios_via_http(sessao: requests.Session) -> dict:
     """
-    Descarrega o relatório de abstenção garantindo a navegação fisiológica prévia.
+    Descarrega o relatório de abstenção da Autocred, processando o DOM HTML
+    onde o Grupo reside na primeira coluna e a Cota/Versão na segunda.
     """
     mapa = {}
     alvos = {"1030": "CANCELADO", "11345": "DESISTENTE"}
@@ -399,18 +400,31 @@ def mapear_relatorios_via_http(sessao: requests.Session) -> dict:
             ):
                 sopa = BeautifulSoup(resposta.text, "html.parser")
                 linhas_encontradas = 0
+
+                # O HTML da Autocred distribui os dados em colunas separadas
                 for linha in sopa.find_all("tr"):
                     colunas = linha.find_all("td")
-                    if colunas:
-                        texto_coluna = colunas[0].text.strip()
-                        regex_str = r"^(\d{4,6})\s+(\d{3,4})\s*-\s*(\d{1,2})"
-                        match = re.match(regex_str, texto_coluna)
-                        if match:
-                            g_id = int(match.group(1))
-                            c_id = int(match.group(2))
-                            v_id = int(match.group(3))
+
+                    # Garantir que a linha tem pelo menos o Grupo (col 0) e Cota (col 1)
+                    if colunas and len(colunas) >= 2:
+                        txt_grupo = colunas[0].text.strip()
+                        txt_cota_versao = colunas[1].text.strip()
+
+                        # Extrai todos os dígitos da coluna do Grupo (ex: " 000608" -> "608")
+                        g_limpo = re.sub(r"\D", "", txt_grupo)
+                        if not g_limpo:
+                            continue
+
+                        # Extrai a Cota e a Versão da segunda coluna (ex: "0754 - 03")
+                        match_cota = re.search(r"(\d+)\s*-\s*(\d+)", txt_cota_versao)
+
+                        if match_cota:
+                            g_id = int(g_limpo)
+                            c_id = int(match_cota.group(1))
+                            v_id = int(match_cota.group(2))
                             mapa[(g_id, c_id, v_id)] = status
                             linhas_encontradas += 1
+
                 logger.info(
                     "    [RELATÓRIOS] Form %s carregado. Encontrados %d inativos válidos.",
                     codigo_form,

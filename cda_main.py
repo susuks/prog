@@ -1,9 +1,10 @@
 """
-Motor Principal do Controle de Adimplência (CDA) V2.
+Motor Principal do Controle de Adimplência (CDA) V2 - Enterprise.
 
 Orquestra a auditoria sequencial veloz na Autocred via HTTP puro,
 acumulando as respostas em buffers de memória e disparando as atualizações
-para o Google Sheets em Lotes (Batch Update), obliterando a latência da API.
+para o Google Sheets em Lotes (Batch Update) ou de forma Assíncrona,
+obliterando a latência da API.
 """
 
 import time
@@ -52,19 +53,16 @@ def tarefa_background_lote(lote_dados):
     Descarrega um lote massivo de atualizações para o Google Sheets.
     Agrupa os dados por Planilha/Aba para abrir a conexão apenas uma vez por
     alvo, e utiliza a função 'batch_update' para escrever tudo numa só chamada.
+    Fase 2: As abas mensais da GERAL foram extintas.
     """
     tempo_inicio = time.time()
 
     mapa_vendedor = {}
-    mapa_geral_mes = {}
     mapa_geral_ano = {}
 
     for item in lote_dados:
         cv = (item["nome_planilha"], item["aba_original"])
         mapa_vendedor.setdefault(cv, []).append(item)
-
-        cgm = (f"{PREFIXO_PLANILHA}GERAL", item["aba_original"])
-        mapa_geral_mes.setdefault(cgm, []).append(item)
 
         cga = (f"{PREFIXO_PLANILHA}GERAL", NOME_ABA_GERAL)
         mapa_geral_ano.setdefault(cga, []).append(item)
@@ -101,12 +99,11 @@ def tarefa_background_lote(lote_dados):
                     time.sleep(1)
 
         processar_agrupamento(mapa_vendedor, 13, "Q", "S")
-        processar_agrupamento(mapa_geral_mes, 12, "S", "U")
         processar_agrupamento(mapa_geral_ano, 12, "S", "U")
 
         duracao = time.time() - tempo_inicio
         logger_crm.info(
-            "    [SHEETS BATCH] Lote de %d contratos sincronizado massivamente "
+            "    [SHEETS BATCH CDA] Lote de %d contratos sincronizado massivamente "
             "em %.2fs.",
             len(lote_dados),
             duracao,
@@ -116,10 +113,28 @@ def tarefa_background_lote(lote_dados):
         logger_crm.error("    [SHEETS BATCH ERRO] Falha ao processar o lote: %s", e)
 
 
+def disparar_limbo_async(nome_planilha, aba_original, contrato):
+    """
+    Grava o status 'Inacessível' em background sem bloquear o scanner.
+    """
+    try:
+        sheet_vendedor = conectar_google_sheets(nome_planilha, aba_original)
+        if sheet_vendedor:
+            registrar_apenas_situacao_cliente(
+                sheet_vendedor, contrato, "Inacessível", 13, 19
+            )
+
+        sheet_geral = conectar_google_sheets(f"{PREFIXO_PLANILHA}GERAL", NOME_ABA_GERAL)
+        if sheet_geral:
+            registrar_apenas_situacao_cliente(
+                sheet_geral, contrato, "Inacessível", 12, 21
+            )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger_crm.error("    [ERRO LIMBO ASYNC] Falha ao processar gravação: %s", e)
+
+
 def aquecer_sessao_asp(sessao: requests.Session) -> bool:
-    """
-    Sincroniza a sessão HTTP injetada com os frames do servidor ASP.
-    """
+    """Sincroniza a sessão HTTP injetada com os frames do servidor ASP."""
     try:
         url_master = (
             "https://intranet.consorciotradicao.com.br/autocred/MasterFrameset.asp"
@@ -146,9 +161,7 @@ def aquecer_sessao_asp(sessao: requests.Session) -> bool:
 
 
 def criar_sessao_hibrida() -> requests.Session:
-    """
-    Constrói uma sessão HTTP falsificando a identidade de um navegador real.
-    """
+    """Constrói sessão HTTP falsificando a identidade de um navegador real."""
     logger_crm.info("=== Iniciando Sequestro de Sessão (Híbrido - V2) ===")
     driver = iniciar_navegador()
     sessao_http = requests.Session()
@@ -186,9 +199,7 @@ def criar_sessao_hibrida() -> requests.Session:
 
 
 def loop_reanalise_adimplencia():
-    """
-    Loop principal ininterrupto do sistema corporativo (CDA).
-    """
+    """Loop principal ininterrupto do sistema corporativo (CDA)."""
     logger_crm.info("=== Motor CDA (Estabilizado e Fisiológico) Iniciado ===")
 
     sessao_http = criar_sessao_hibrida()
@@ -215,6 +226,10 @@ def loop_reanalise_adimplencia():
                 "[OFFLINE] Sincronizando relatórios de Cancelados/Desistentes..."
             )
             ESTADO_GERAL["mapa_inativos_ram"] = mapear_relatorios_via_http(sessao_http)
+
+            logger_crm.info("[SISTEMA] Reancorando sessão ao módulo de Atendimento...")
+            aquecer_sessao_asp(sessao_http)
+
             logger_crm.info(
                 "[OFFLINE] RAM Populada. Total de %d contratos inativados.",
                 len(ESTADO_GERAL["mapa_inativos_ram"]),
@@ -232,16 +247,25 @@ def loop_reanalise_adimplencia():
 
         buffer_inativos = []
 
+        # =====================================================================
+        # 1. VARREDURA OFFLINE O(1) (Cruzamento de Dados com o Filtro RAM)
+        # =====================================================================
         for contrato, info in adimplencia.items():
-            cota_versao = info.get("cota_versao")
-            if cota_versao and info.get("monitorar", True) is not False:
+            if info.get("monitorar", True) is not False:
                 grupo = limpar_inteiro(info.get("grupo"))
-                cota_base = limpar_inteiro(
-                    str(info.get("cota")).split("-", maxsplit=1)[0]
-                )
-                match_v = re.search(r"(\d+)\s*-\s*(\d+)", str(cota_versao))
-                versao = limpar_inteiro(match_v.group(2)) if match_v else 0
+                cota_str = str(info.get("cota", ""))
 
+                # Fatiamento em tempo real: Separa "0754 - 03" em Base e Versão
+                cota_base = (
+                    limpar_inteiro(cota_str.split("-", maxsplit=1)[0])
+                    if "-" in cota_str
+                    else limpar_inteiro(cota_str)
+                )
+
+                match_v = re.search(r"(\d+)\s*-\s*(\d+)", cota_str)
+                versao = int(match_v.group(2)) if match_v else 0
+
+                # Consulta O(1) diretamente na RAM Populada
                 status_ram = mapa_ram.get((grupo, cota_base, versao))
 
                 if status_ram:
@@ -267,11 +291,13 @@ def loop_reanalise_adimplencia():
                     mudou_json = True
                     continue
 
+            # Se sobreviveu ao filtro RAM, entra na fila online
             if info.get("monitorar", True):
                 ultima_verificacao = info.get("ultima_verificacao", 0)
                 if (agora - ultima_verificacao) >= intervalo_reanalise:
                     fila_online.append((ultima_verificacao, contrato, info))
 
+        # Descarrega os inativos detectados no Sheets massivamente
         if buffer_inativos:
             executor_sheets.submit(tarefa_background_lote, buffer_inativos.copy())
 
@@ -294,6 +320,9 @@ def loop_reanalise_adimplencia():
         tempo_ultimo_lote = time.time()
         tamanho_lote = 20
 
+        # =====================================================================
+        # 2. AUDITORIA ONLINE (Requisições HTTP Fisiológicas)
+        # =====================================================================
         for index, (_, contrato, info) in enumerate(fila_online, start=1):
             logger_crm.info(
                 " -> Analisando [%d/%d] | Contrato: %s", index, total_fila, contrato
@@ -372,12 +401,15 @@ def loop_reanalise_adimplencia():
                             "    [LIMBO NOVO] Contrato %s inacessível.", contrato
                         )
 
-                        sheet_morta = conectar_google_sheets(
-                            info["nome_planilha"], info["aba_original"]
+                        # Despacha a gravação do Inacessível para a thread em background
+                        # libertando o scanner para analisar o próximo cliente em milissegundos
+                        executor_sheets.submit(
+                            disparar_limbo_async,
+                            info["nome_planilha"],
+                            info["aba_original"],
+                            contrato,
                         )
-                        registrar_apenas_situacao_cliente(
-                            sheet_morta, contrato, "Inacessível", 13, 19
-                        )
+
                     else:
                         dias = int((time.time() - info["data_limbo"]) / 86400)
                         if dias > limite_dias_inativo:
