@@ -1,21 +1,22 @@
 """
-Módulo Motor de Navegação e Extração (Web Scraping).
+Motor de Navegação Web (Selenium).
 
-Responsável por inicializar o navegador, interagir com o Document Object
-Model (DOM), resolver Captchas via IA (CapSolver) e extrair dados da Autocred.
+Responsável por gerenciar as instâncias do navegador, transpor barreiras
+de login e reCaptcha (CapSolver) e extrair os dados cadastrais diretamente do DOM.
 """
 
 import os
 import time
 import logging
+
 import requests
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
 
 from gerador_dados import (
@@ -46,6 +47,7 @@ def iniciar_navegador() -> webdriver.Chrome:
 
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
 
     mascara = (
@@ -109,6 +111,7 @@ def buscar_contrato(driver: webdriver.Chrome, contrato: str) -> bool:
             EC.element_to_be_clickable((By.XPATH, xpath_resultado))
         )
         resultado.click()
+
         time.sleep(PAUSA_HUMANA)
 
         driver.switch_to.default_content()
@@ -144,7 +147,8 @@ def verificar_apenas_pagamento(driver: webdriver.Chrome) -> bool:
 
 def extrair_dados_completos(driver: webdriver.Chrome) -> dict:
     """
-    Raspa todas as informações cadastrais e financeiras do cliente.
+    Raspa todas as informações cadastrais e financeiras do cliente,
+    incluindo a versão exata do contrato no momento da venda.
     """
     dados = {
         "credito": 0.00,
@@ -153,9 +157,10 @@ def extrair_dados_completos(driver: webdriver.Chrome) -> dict:
         "data_venda": "",
         "grupo": "-",
         "cota": "-",
+        "versao": None,
         "pago": False,
-        "cpf": "-",
         "estado": "-",
+        "cpf": "-",
     }
 
     try:
@@ -196,6 +201,14 @@ def extrair_dados_completos(driver: webdriver.Chrome) -> dict:
     except Exception:  # pylint: disable=broad-exception-caught
         pass
 
+    # --- CAPTURA DA VERSÃO NA FICHA PRINCIPAL ---
+    try:
+        xpath_versao = "/html/body/table[4]/tbody/tr[2]/td/strong[3]"
+        texto_versao = driver.find_element(By.XPATH, xpath_versao).text
+        dados["versao"] = limpar_inteiro(texto_versao)
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass
+
     try:
         xpath_pagas = "//td[contains(text(), 'Parcelas Pagas:')]/following-sibling::td"
         elem = driver.find_element(By.XPATH, xpath_pagas)
@@ -220,14 +233,21 @@ def extrair_dados_completos(driver: webdriver.Chrome) -> dict:
     try:
         # Retorna para a aba principal "Consorciado"
         aba_consorciado = WebDriverWait(driver, 5).until(
-            EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'Consorciado')]"))
+            EC.element_to_be_clickable(
+                (By.XPATH, "//a[contains(text(), 'Consorciado')]")
+            )
         )
         aba_consorciado.click()
         time.sleep(PAUSA_HUMANA)
 
         # Clica na sub-aba "Endereço Residencial"
         aba_endereco = WebDriverWait(driver, 5).until(
-            EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'Endereço Residencial')] | //td[contains(text(), 'Endereço Residencial')]"))
+            EC.element_to_be_clickable(
+                (
+                    By.XPATH,
+                    "//a[contains(text(), 'Endereço Residencial')] | //td[contains(text(), 'Endereço Residencial')]",
+                )
+            )
         )
         aba_endereco.click()
         time.sleep(PAUSA_HUMANA)
@@ -236,7 +256,8 @@ def extrair_dados_completos(driver: webdriver.Chrome) -> dict:
         elem_estado = WebDriverWait(driver, 5).until(
             EC.presence_of_element_located((By.ID, "ESTADO"))
         )
-        dados["estado"] = elem_estado.get_attribute("value").strip()
+        dados["estado"] = elem_estado.text.strip().upper()
+
     except Exception:  # pylint: disable=broad-exception-caught
         pass
 
@@ -272,8 +293,8 @@ def carregar_chave_capsolver() -> str:
     if os.path.exists("files/config.txt"):
         with open("files/config.txt", "r", encoding="utf-8") as f:
             for linha in f:
-                if linha.startswith("CAPSOLVER_KEY="):
-                    return linha.split("=", 1)[1].strip()
+                if "CAPSOLVER" in linha:
+                    return linha.split("=")[1].strip()
     return ""
 
 
@@ -285,7 +306,7 @@ def resolver_captcha_api_direta(api_key: str, site_url: str, site_key: str) -> s
     payload = {
         "clientKey": api_key,
         "task": {
-            "type": "ReCaptchaV2TaskProxyLess",
+            "type": "ReCaptchaV2TaskProxyless",
             "websiteURL": site_url,
             "websiteKey": site_key,
         },
@@ -312,14 +333,13 @@ def resolver_captcha_api_direta(api_key: str, site_url: str, site_key: str) -> s
             res_status = requests.post(
                 "https://api.capsolver.com/getTaskResult",
                 json={"clientKey": api_key, "taskId": task_id},
-                timeout=100,
+                timeout=10,
             ).json()
 
             status = res_status.get("status")
             if status == "ready":
                 logger.info("   -> [SUCESSO IA] Token gerado! Enigma resolvido.")
-                return res_status.get("solution").get("gRecaptchaResponse")
-
+                return res_status.get("solution", {}).get("gRecaptchaResponse", "")
             if status == "failed":
                 logger.error(
                     "   -> [ERRO IA] A inteligência falhou em resolver o desafio."
@@ -343,34 +363,25 @@ def fazer_login_com_ia(driver) -> bool:
     driver.get(url_site)
 
     try:
-        try:
-            WebDriverWait(driver, 5).until(
-                EC.frame_to_be_available_and_switch_to_it((By.NAME, "mainFrame"))
-            )
-            driver.switch_to.default_content()
-        except Exception:  # pylint: disable=broad-exception-caught
-            pass
-
-        campo_user = WebDriverWait(driver, 15).until(
+        WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.ID, "j_username"))
         )
-        campo_user.clear()
-        campo_user.send_keys(USUARIO_LOGIN)
 
-        campo_senha = driver.find_element(By.ID, "j_password")
-        campo_senha.clear()
-        campo_senha.send_keys(SENHA_LOGIN)
+        driver.find_element(By.ID, "j_username").clear()
+        driver.find_element(By.ID, "j_username").send_keys(USUARIO_LOGIN)
+
+        driver.find_element(By.ID, "j_password").clear()
+        driver.find_element(By.ID, "j_password").send_keys(SENHA_LOGIN)
+
         logger.info(
             "   -> Credenciais inseridas. Localizando a fechadura do Captcha..."
         )
 
+        site_key = None
         try:
-            elemento_captcha = driver.find_element(By.CLASS_NAME, "g-recaptcha")
-            site_key = elemento_captcha.get_attribute("data-sitekey")
+            recaptcha_div = driver.find_element(By.CLASS_NAME, "g-recaptcha")
+            site_key = recaptcha_div.get_attribute("data-sitekey")
         except Exception:  # pylint: disable=broad-exception-caught
-            logger.warning(
-                "   -> [AVISO] Captcha não encontrado. Tentando logar direto..."
-            )
             site_key = None
 
         if site_key:
@@ -400,7 +411,7 @@ def fazer_login_com_ia(driver) -> bool:
         except Exception:  # pylint: disable=broad-exception-caught
             driver.find_element(By.ID, "j_password").send_keys(Keys.ENTER)
 
-        time.sleep(6)
+        time.sleep(5)
 
         driver.switch_to.default_content()
         url_atual = driver.current_url.lower()
@@ -414,13 +425,13 @@ def fazer_login_com_ia(driver) -> bool:
 
         # ESTABILIZAÇÃO OBRIGATÓRIA NOS FRAMES
         logger.info("   -> [SUCESSO] Redirecionando e ancorando no MasterFrameset...")
-        driver.get("https://intranet.consorciotradicao.com.br/autocred/MasterFrameset.asp")
+        driver.get(
+            "https://intranet.consorciotradicao.com.br/autocred/MasterFrameset.asp"
+        )
         time.sleep(2)
 
         return True
 
     except Exception as e:  # pylint: disable=broad-exception-caught
-        logger.error(
-            "   -> [ERRO PORTARIA] Sequência de login falhou criticamente: %s", e
-        )
+        logger.error("Erro interno do motor de execução: %s", e)
         return False

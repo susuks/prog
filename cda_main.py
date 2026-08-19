@@ -48,13 +48,25 @@ logger_crm.addHandler(logging.StreamHandler())
 ESTADO_GERAL = {"ultima_sincronizacao_ram": 0, "mapa_inativos_ram": {}}
 
 
+def comparar_nomes(nome1, nome2):
+    """
+    Compara nomes ignorando maiúsculas e permitindo contenção parcial.
+    Ex: 'RENATO MORALES' e 'RENATO MORALES DE SOUZA' resultam em True.
+    """
+    if not nome1 or not nome2:
+        return False
+
+    n1 = " ".join(str(nome1).upper().split())
+    n2 = " ".join(str(nome2).upper().split())
+
+    if len(n1) < 3 or len(n2) < 3:
+        return False
+
+    return n1 in n2 or n2 in n1
+
+
 def tarefa_background_lote(lote_dados):
-    """
-    Descarrega um lote massivo de atualizações para o Google Sheets.
-    Agrupa os dados por Planilha/Aba para abrir a conexão apenas uma vez por
-    alvo, e utiliza a função 'batch_update' para escrever tudo numa só chamada.
-    Fase 2: As abas mensais da GERAL foram extintas.
-    """
+    """Descarrega um lote massivo de atualizações para o Google Sheets."""
     tempo_inicio = time.time()
 
     mapa_vendedor = {}
@@ -69,7 +81,9 @@ def tarefa_background_lote(lote_dados):
 
     try:
 
-        def processar_agrupamento(agrupamento, col_busca, col_inicio, col_fim):
+        def processar_agrupamento(
+            agrupamento, col_busca, col_inicio, col_fim, col_situacao_isolada
+        ):
             for (nome, aba), itens in agrupamento.items():
                 if not nome or not aba:
                     continue
@@ -81,30 +95,38 @@ def tarefa_background_lote(lote_dados):
                 for it in itens:
                     linha = cache_cda.obter_linha(sheet, it["contrato"], col_busca)
                     if linha:
-                        payload_batch.append(
-                            {
-                                "range": f"{col_inicio}{linha}:{col_fim}{linha}",
-                                "values": [
-                                    [
-                                        str(it["status_pgto"]),
-                                        int(it["parcelas"]),
-                                        str(it["status_cliente"]),
-                                    ]
-                                ],
-                            }
-                        )
+                        if it.get("apenas_situacao"):
+                            payload_batch.append(
+                                {
+                                    "range": f"{col_situacao_isolada}{linha}",
+                                    "values": [[str(it["status_cliente"])]],
+                                }
+                            )
+                        else:
+                            payload_batch.append(
+                                {
+                                    "range": f"{col_inicio}{linha}:{col_fim}{linha}",
+                                    "values": [
+                                        [
+                                            str(it["status_pgto"]),
+                                            int(it["parcelas"]),
+                                            str(it["status_cliente"]),
+                                        ]
+                                    ],
+                                }
+                            )
 
                 if payload_batch:
                     sheet.batch_update(payload_batch, value_input_option="USER_ENTERED")
                     time.sleep(1)
 
-        processar_agrupamento(mapa_vendedor, 13, "Q", "S")
-        processar_agrupamento(mapa_geral_ano, 12, "S", "U")
+        processar_agrupamento(mapa_vendedor, 13, "Q", "S", "S")
+        processar_agrupamento(mapa_geral_ano, 12, "S", "U", "U")
 
         duracao = time.time() - tempo_inicio
         logger_crm.info(
-            "    [SHEETS BATCH CDA] Lote de %d contratos sincronizado massivamente "
-            "em %.2fs.",
+            "    [SHEETS BATCH CDA] Lote de %d contratos sincronizado "
+            "massivamente em %.2fs.",
             len(lote_dados),
             duracao,
         )
@@ -114,9 +136,7 @@ def tarefa_background_lote(lote_dados):
 
 
 def disparar_limbo_async(nome_planilha, aba_original, contrato):
-    """
-    Grava o status 'Inacessível' em background sem bloquear o scanner.
-    """
+    """Grava o status 'Inacessível' em background sem bloquear o scanner."""
     try:
         sheet_vendedor = conectar_google_sheets(nome_planilha, aba_original)
         if sheet_vendedor:
@@ -168,20 +188,14 @@ def criar_sessao_hibrida() -> requests.Session:
 
     mascara_agente = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     )
     mascara_accept = (
         "text/html,application/xhtml+xml,application/xml;q=0.9,"
         "image/avif,image/webp,*/*;q=0.8"
     )
 
-    sessao_http.headers.update(
-        {
-            "User-Agent": mascara_agente,
-            "Accept": mascara_accept,
-        }
-    )
+    sessao_http.headers.update({"User-Agent": mascara_agente, "Accept": mascara_accept})
 
     if fazer_login_com_ia(driver):
         for cookie in driver.get_cookies():
@@ -200,7 +214,9 @@ def criar_sessao_hibrida() -> requests.Session:
 
 def loop_reanalise_adimplencia():
     """Loop principal ininterrupto do sistema corporativo (CDA)."""
-    logger_crm.info("=== Motor CDA (Estabilizado e Fisiológico) Iniciado ===")
+    logger_crm.info(
+        "=== Motor CDA (Estabilizado e com Validação de Nomes) Iniciado ==="
+    )
 
     sessao_http = criar_sessao_hibrida()
     ultimo_login = time.time()
@@ -244,65 +260,86 @@ def loop_reanalise_adimplencia():
         mudou_json = False
         mapa_ram = ESTADO_GERAL["mapa_inativos_ram"]
         fila_online = []
-
-        buffer_inativos = []
+        buffer_atualizacoes = []
 
         # =====================================================================
-        # 1. VARREDURA OFFLINE O(1) (Cruzamento de Dados com o Filtro RAM)
+        # 1. VARREDURA OFFLINE O(1) (Filtro RAM Estrito por Versão)
         # =====================================================================
         for contrato, info in adimplencia.items():
             if info.get("monitorar", True) is not False:
                 grupo = limpar_inteiro(info.get("grupo"))
-                cota_str = str(info.get("cota", ""))
 
-                # Fatiamento em tempo real: Separa "0754 - 03" em Base e Versão
+                cota_suja = str(info.get("cota", ""))
                 cota_base = (
-                    limpar_inteiro(cota_str.split("-", maxsplit=1)[0])
-                    if "-" in cota_str
-                    else limpar_inteiro(cota_str)
+                    limpar_inteiro(cota_suja.split("-", maxsplit=1)[0])
+                    if "-" in cota_suja
+                    else limpar_inteiro(cota_suja)
                 )
 
-                match_v = re.search(r"(\d+)\s*-\s*(\d+)", cota_str)
-                versao = int(match_v.group(2)) if match_v else 0
+                if "-" in cota_suja:
+                    info["cota"] = str(cota_base)
+                    if not info.get("cota_versao"):
+                        info["cota_versao"] = cota_suja.replace(" ", "")
+                    mudou_json = True
 
-                # Consulta O(1) diretamente na RAM Populada
-                status_ram = mapa_ram.get((grupo, cota_base, versao))
+                cota_versao_str = str(info.get("cota_versao", ""))
+                match_v = re.search(r"(\d+)\s*-\s*(\d+)", cota_versao_str)
+                versao = int(match_v.group(2)) if match_v else None
+
+                status_ram = None
+                versao_morta = None
+
+                if versao is not None:
+                    versao_desistente = versao + 40
+                    resultado_ram = mapa_ram.get((grupo, cota_base, versao))
+
+                    if resultado_ram:
+                        status_ram = resultado_ram[0]
+                        versao_morta = versao
+                    else:
+                        resultado_ram = mapa_ram.get(
+                            (grupo, cota_base, versao_desistente)
+                        )
+                        if resultado_ram and resultado_ram[0] == "DESISTENTE":
+                            status_ram = resultado_ram[0]
+                            versao_morta = versao_desistente
 
                 if status_ram:
                     logger_crm.warning(
-                        "[MUDANÇA] Contrato %s classificado %s via Filtro RAM.",
+                        "[MUDANÇA] Contrato %s classificado %s via Filtro RAM "
+                        "Estrito (Versão: %s).",
                         contrato,
                         status_ram,
+                        versao_morta,
                     )
 
-                    buffer_inativos.append(
+                    buffer_atualizacoes.append(
                         {
                             "contrato": contrato,
                             "nome_planilha": info["nome_planilha"],
                             "aba_original": info["aba_original"],
-                            "status_pgto": "CANCELADO/DESIST",
-                            "parcelas": 0,
                             "status_cliente": status_ram,
+                            "apenas_situacao": True,
                         }
                     )
 
                     info["monitorar"] = False
-                    info["ultimo_status"] = "CANCELADO/DESIST"
+                    info["ultimo_status"] = status_ram
                     mudou_json = True
                     continue
 
-            # Se sobreviveu ao filtro RAM, entra na fila online
             if info.get("monitorar", True):
                 ultima_verificacao = info.get("ultima_verificacao", 0)
                 if (agora - ultima_verificacao) >= intervalo_reanalise:
                     fila_online.append((ultima_verificacao, contrato, info))
 
-        # Descarrega os inativos detectados no Sheets massivamente
-        if buffer_inativos:
-            executor_sheets.submit(tarefa_background_lote, buffer_inativos.copy())
+        if buffer_atualizacoes:
+            executor_sheets.submit(tarefa_background_lote, buffer_atualizacoes.copy())
+            buffer_atualizacoes.clear()
 
         if mudou_json:
             salvar_adimplencia(adimplencia)
+            mudou_json = False
 
         fila_online.sort(key=lambda x: x[0])
         total_fila = len(fila_online)
@@ -316,12 +353,11 @@ def loop_reanalise_adimplencia():
             total_fila,
         )
 
-        buffer_atualizacoes = []
         tempo_ultimo_lote = time.time()
         tamanho_lote = 20
 
         # =====================================================================
-        # 2. AUDITORIA ONLINE (Requisições HTTP Fisiológicas)
+        # 2. AUDITORIA ONLINE E AUTO-CURA VIA NOME DO CLIENTE
         # =====================================================================
         for index, (_, contrato, info) in enumerate(fila_online, start=1):
             logger_crm.info(
@@ -337,6 +373,19 @@ def loop_reanalise_adimplencia():
 
                 if dados_rede.get("cpf") and dados_rede["cpf"] != info.get("cpf"):
                     info["cpf"] = dados_rede["cpf"]
+
+                nome_site = dados_rede.get("nome")
+                if nome_site and info.get("nome") != nome_site:
+                    info["nome"] = nome_site
+                    mudou_json = True
+
+                versao_site = dados_rede.get("versao")
+                if versao_site is not None:
+                    cota_base = limpar_inteiro(info.get("cota"))
+                    nova_cota_versao = f"{cota_base:04d}-{versao_site:02d}"
+                    if info.get("cota_versao") != nova_cota_versao:
+                        info["cota_versao"] = nova_cota_versao
+                        mudou_json = True
 
                 recuperou_do_limbo = False
                 if info.get("data_limbo") is not None:
@@ -373,6 +422,7 @@ def loop_reanalise_adimplencia():
                             "status_pgto": st_atual,
                             "parcelas": pc_atual,
                             "status_cliente": "Ativo",
+                            "apenas_situacao": False,
                         }
                     )
 
@@ -395,35 +445,76 @@ def loop_reanalise_adimplencia():
 
                 if motivo == "NAO_ENCONTRADO":
                     info["ultima_verificacao"] = time.time()
-                    if not info.get("data_limbo"):
-                        info["data_limbo"] = time.time()
-                        logger_crm.warning(
-                            "    [LIMBO NOVO] Contrato %s inacessível.", contrato
-                        )
+                    resolvido_na_cura = False
 
-                        # Despacha a gravação do Inacessível para a thread em background
-                        # libertando o scanner para analisar o próximo cliente em milissegundos
-                        executor_sheets.submit(
-                            disparar_limbo_async,
-                            info["nome_planilha"],
-                            info["aba_original"],
-                            contrato,
-                        )
+                    # --- INÍCIO DA AUTO-CURA INTELIGENTE ---
+                    grupo = limpar_inteiro(info.get("grupo"))
+                    cota_base = limpar_inteiro(info.get("cota"))
+                    nome_cliente_json = info.get("nome", "")
 
-                    else:
-                        dias = int((time.time() - info["data_limbo"]) / 86400)
-                        if dias > limite_dias_inativo:
-                            logger_crm.error(
-                                "    [EXPIRADO] Contrato %s atingiu limite.", contrato
+                    if nome_cliente_json:
+                        for (g_map, c_map, v_map), (
+                            st_map,
+                            nome_map,
+                        ) in mapa_ram.items():
+                            if g_map == grupo and c_map == cota_base:
+                                if comparar_nomes(nome_cliente_json, nome_map):
+                                    logger_crm.warning(
+                                        "[AUTO-CURA] Contrato %s validado como %s via "
+                                        "cruzamento de Nome ('%s' <-> '%s'). Versão: %s",
+                                        contrato,
+                                        st_map,
+                                        nome_cliente_json,
+                                        nome_map,
+                                        v_map,
+                                    )
+                                    info["cota_versao"] = f"{cota_base:04d}-{v_map:02d}"
+                                    info["monitorar"] = False
+                                    info["ultimo_status"] = st_map
+                                    mudou_json = True
+
+                                    buffer_atualizacoes.append(
+                                        {
+                                            "contrato": contrato,
+                                            "nome_planilha": info["nome_planilha"],
+                                            "aba_original": info["aba_original"],
+                                            "status_cliente": st_map,
+                                            "apenas_situacao": True,
+                                        }
+                                    )
+                                    resolvido_na_cura = True
+                                    break
+                    # --- FIM DA AUTO-CURA INTELIGENTE ---
+
+                    if not resolvido_na_cura:
+                        if not info.get("data_limbo"):
+                            info["data_limbo"] = time.time()
+                            logger_crm.warning(
+                                "    [LIMBO NOVO] Contrato %s inacessível.", contrato
                             )
-                            info["monitorar"] = False
-                        else:
-                            logger_crm.info(
-                                "    [LIMBO ATIVO] %s carência (%d/%d dias).",
+
+                            executor_sheets.submit(
+                                disparar_limbo_async,
+                                info["nome_planilha"],
+                                info["aba_original"],
                                 contrato,
-                                dias,
-                                limite_dias_inativo,
                             )
+
+                        else:
+                            dias = int((time.time() - info["data_limbo"]) / 86400)
+                            if dias > limite_dias_inativo:
+                                logger_crm.error(
+                                    "    [EXPIRADO] Contrato %s atingiu limite.",
+                                    contrato,
+                                )
+                                info["monitorar"] = False
+                            else:
+                                logger_crm.info(
+                                    "    [LIMBO ATIVO] %s carência (%d/%d dias).",
+                                    contrato,
+                                    dias,
+                                    limite_dias_inativo,
+                                )
 
             condicao_tempo = (time.time() - tempo_ultimo_lote) > 60
             if len(buffer_atualizacoes) >= tamanho_lote or condicao_tempo:
@@ -442,6 +533,7 @@ def loop_reanalise_adimplencia():
             if contrato in bd_atual:
                 bd_atual[contrato].update(info)
             salvar_adimplencia(bd_atual)
+            mudou_json = False
 
         if buffer_atualizacoes:
             logger_crm.info(

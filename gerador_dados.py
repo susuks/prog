@@ -26,6 +26,7 @@ ARQUIVO_HISTORICO_SUCESSO = "files/historico_concluidos.csv"
 ARQUIVO_PENDENTES = "files/pendentes_reanalise.json"
 ARQUIVO_CACHE_PLANILHAS = "files/cache_planilhas.json"
 ARQUIVO_CONFIG = "files/config.txt"
+
 MAX_TENTATIVAS = 10000
 TEMPO_INATIVIDADE_MAXIMO = 300
 
@@ -48,26 +49,23 @@ def carregar_configuracoes() -> dict:
     if not os.path.exists(ARQUIVO_CONFIG):
         return config
 
-    try:
-        with open(ARQUIVO_CONFIG, "r", encoding="utf-8") as f:
-            for linha in f:
-                if "=" in linha:
-                    chave, valor = linha.split("=", 1)
-                    chave = chave.strip()
-                    valor_limpo = valor.replace("\n", "").replace("\r", "")
+    with open(ARQUIVO_CONFIG, "r", encoding="utf-8") as f:
+        for linha in f:
+            if "=" in linha:
+                chave, valor = linha.split("=", 1)
+                chave = chave.strip()
+                valor_limpo = valor.replace("\n", "").replace("\r", "")
 
-                    if chave == "MODO_DESKTOP":
-                        config[chave] = valor_limpo.strip().lower() in [
-                            "true",
-                            "1",
-                            "sim",
-                            "v",
-                        ]
-                    else:
-                        config[chave] = valor_limpo
-        return config
-    except OSError:
-        return config
+                if chave == "MODO_DESKTOP":
+                    config[chave] = valor_limpo.lower() in [
+                        "true",
+                        "1",
+                        "sim",
+                        "v",
+                    ]
+                else:
+                    config[chave] = valor_limpo
+    return config
 
 
 def obter_mes_utc4() -> str:
@@ -124,8 +122,9 @@ def limpar_valor(texto: str) -> float:
     try:
         match = re.search(r"([\d\.]+,\d{2})", str(texto))
         if match:
-            valor_texto = match.group(1).replace(".", "").replace(",", ".")
-            return float(valor_texto)
+            valor_limpo = match.group(1)
+            valor_float = float(valor_limpo.replace(".", "").replace(",", "."))
+            return valor_float
         return 0.00
     except (ValueError, TypeError):
         return 0.00
@@ -149,10 +148,12 @@ def carregar_pendentes() -> dict:
 
 def salvar_pendentes(dados: dict) -> None:
     """
-    Persiste o dicionário de contratos pendentes no arquivo JSON.
+    Grava as alterações usando Escrita Atômica Anti-Corrupção.
     """
-    with open(ARQUIVO_PENDENTES, "w", encoding="utf-8") as f:
+    temp_file = ARQUIVO_PENDENTES + ".tmp"
+    with open(temp_file, "w", encoding="utf-8") as f:
         json.dump(dados, f, indent=4)
+    os.replace(temp_file, ARQUIVO_PENDENTES)
 
 
 def verificar_contrato_registrado(contrato: str) -> bool:
@@ -166,9 +167,9 @@ def verificar_contrato_registrado(contrato: str) -> bool:
     if os.path.exists(ARQUIVO_HISTORICO_SUCESSO):
         try:
             with open(ARQUIVO_HISTORICO_SUCESSO, "r", encoding="utf-8") as f:
-                for linha in f:
-                    if linha.startswith(f"{contrato},"):
-                        return True
+                conteudo = f.read()
+                if str(contrato) in conteudo:
+                    return True
         except OSError:
             pass
 
@@ -178,11 +179,13 @@ def verificar_contrato_registrado(contrato: str) -> bool:
 def adicionar_para_reanalise(
     contrato: str,
     vendedor_nome: str,
-    vendedor_tel: str,
     nome_planilha: str,
+    vendedor_tel: str,
     origem: str,
     dados_completos: dict,
     aba_original: str,
+    nome_cliente: str = None,
+    versao: int = None,
 ) -> None:
     """
     Registra um contrato pendente de pagamento na memória de curto prazo (JSON),
@@ -191,13 +194,15 @@ def adicionar_para_reanalise(
     pendentes = carregar_pendentes()
     pendentes[contrato] = {
         "vendedor_nome": vendedor_nome,
-        "vendedor_tel": vendedor_tel,
         "nome_planilha": nome_planilha,
+        "vendedor_tel": vendedor_tel,
         "origem": origem,
-        "dados_originais": dados_completos,
+        "nome": nome_cliente,
+        "versao": versao,
         "tentativas": 0,
-        "ultima_verificacao": 0,
+        "ultima_verificacao": time.time(),
         "data_inclusao": time.time(),
+        "dados_originais": dados_completos,
         "aba_original": aba_original,
     }
     salvar_pendentes(pendentes)
@@ -222,11 +227,9 @@ def salvar_historico_concluido(
     try:
         with open(ARQUIVO_HISTORICO_SUCESSO, "a", encoding="utf-8") as f:
             if not existe:
-                cabecalho = (
-                    "contrato,planilha_destino,data_registro,"
-                    "vendedor_nome,vendedor_tel,status_pagamento\n"
+                f.write(
+                    "contrato,planilha_destino,data_registro,vendedor_nome,vendedor_tel,status\n"
                 )
-                f.write(cabecalho)
 
             data_hora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
             safe_planilha = str(nome_planilha).replace(",", ".")
@@ -238,7 +241,7 @@ def salvar_historico_concluido(
             )
             f.write(linha)
     except OSError as e:
-        logger.error("   [ERRO HISTÓRICO] Falha ao gravar log local: %s", e)
+        logger.error("   [ERRO HISTÓRICO] Falha ao salvar no histórico: %s", e)
 
 
 # ============================================================================
@@ -280,15 +283,17 @@ def conectar_google_sheets(nome_planilha: str, aba: str):
         try:
             with open(ARQUIVO_CACHE_PLANILHAS, "r", encoding="utf-8") as f:
                 cache = json.load(f)
-        except Exception:  # pylint: disable=broad-exception-caught
-            pass
+        except (OSError, json.JSONDecodeError):
+            cache = {}
 
-    planilha = None
     if nome_planilha in cache:
+        id_planilha = cache[nome_planilha]
         try:
-            planilha = cliente.open_by_key(cache[nome_planilha])
+            planilha = cliente.open_by_key(id_planilha)
         except Exception:  # pylint: disable=broad-exception-caught
-            pass
+            planilha = None
+    else:
+        planilha = None
 
     if not planilha:
         try:
@@ -358,7 +363,7 @@ def encontrar_linha_do_contrato(sheet, contrato: str, col_idx: int) -> int:
     try:
         valores = sheet.col_values(col_idx)
         for i, valor in enumerate(valores, start=1):
-            if str(contrato).strip() == str(valor).strip():
+            if str(valor).strip() == str(contrato).strip():
                 return i
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error("   [ERRO BUSCA PLANILHA] Falha ao localizar cota: %s", e)
@@ -375,8 +380,6 @@ def atualizar_planilha_vendedor(
     status_pag = "1º Parcela Paga" if dados_site.get("pago") else ""
 
     telefone_limpo = re.sub(r"\D", "", str(dados_site.get("telefone", "")))
-    if telefone_limpo and not telefone_limpo.startswith("55"):
-        telefone_limpo = f"55{telefone_limpo}"
 
     dados_cadastrais = [
         str(dados_site.get("data_venda", "")),
@@ -434,8 +437,6 @@ def atualizar_planilha_geral(
     status_pag = "1º Parcela Paga" if dados_site.get("pago") else ""
 
     telefone_limpo = re.sub(r"\D", "", str(dados_site.get("telefone", "")))
-    if telefone_limpo and not telefone_limpo.startswith("55"):
-        telefone_limpo = f"55{telefone_limpo}"
 
     dados_cadastrais = [
         str(dados_site.get("data_venda", "")),
@@ -478,11 +479,19 @@ def atualizar_planilha_geral(
         values=[dados_cadastrais],
         value_input_option="USER_ENTERED",
     )
-    # Extensão do intervalo restaurada até à coluna R
     sheet.update(
         range_name=f"I{linha}:R{linha}",
         values=[dados_financeiros],
         value_input_option="USER_ENTERED",
     )
+
+    # --- NOVO: INJEÇÃO ISOLADA DA VERSÃO NA COLUNA X (Índice 24) ---
+    versao_cota = dados_site.get("versao")
+    if versao_cota is not None:
+        try:
+            sheet.update_cell(linha, 24, f"{versao_cota:02d}")
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.error("   [ERRO PLANILHA] Falha ao gravar versão na coluna X: %s", e)
+    # ---------------------------------------------------------------
 
     return status_pag

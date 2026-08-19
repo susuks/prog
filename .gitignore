@@ -13,13 +13,14 @@ session-sessao-media/
 # Credenciai, Configurações Pessoais, logs, etc...
 files/*.log*
 files/*.json
+files/*.html
+files/*.tmp
 files/sticker_pronto.webp
 files/sticker_id.txt
 files/config.txt
 files/vendedores.csv
 files/vendedores enc.csv
 files/historico_concluidos.csv
-files/*.html
 /importador_cda.py
 /coletor_manual.py
 /corrigir_abas.py

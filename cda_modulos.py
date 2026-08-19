@@ -15,6 +15,8 @@ from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
 
+from gerador_dados import limpar_inteiro
+
 logger = logging.getLogger("EnterpriseCRM")
 ARQUIVO_ADIMPLENCIA = "files/adimplencia.json"
 PAUSA_API_GOOGLE = 0.5
@@ -33,15 +35,11 @@ class GerenciadorCachePlanilhasCDA:
         self._mapas = {}
 
     def _gerar_chave_cache(self, sheet, col_idx: int) -> str:
-        """
-        Gera um identificador criptográfico único para indexar a aba e coluna.
-        """
+        """Gera um identificador único para indexar a aba e coluna."""
         return f"{sheet.spreadsheet.id}|{sheet.title}|{col_idx}"
 
     def _construir_mapa(self, sheet, col_idx: int) -> dict:
-        """
-        Faz o download em lote da coluna via API e processa a correspondência.
-        """
+        """Faz o download em lote da coluna via API e processa a correspondência."""
         chave_cache = self._gerar_chave_cache(sheet, col_idx)
         mapa = {}
         try:
@@ -66,9 +64,7 @@ class GerenciadorCachePlanilhasCDA:
     def obter_linha(self, sheet, contrato: str, col_idx: int) -> int:
         """
         Recupera o índice da linha de um contrato em tempo constante.
-
-        Aplica contingência (Cache Miss) e recarga automática caso a
-        tabela do lado do servidor possua novos contratos adicionados.
+        Aplica contingência (Cache Miss) e recarga automática caso necessário.
         """
         contrato_str = str(contrato).strip()
         chave_cache = self._gerar_chave_cache(sheet, col_idx)
@@ -107,41 +103,48 @@ cache_cda = GerenciadorCachePlanilhasCDA()
 
 
 def carregar_adimplencia() -> dict:
-    """
-    Lê e processa o ficheiro JSON que hospeda o estado estrutural das auditorias.
-    """
+    """Lê e processa o arquivo JSON de auditorias do CDA."""
     if os.path.exists(ARQUIVO_ADIMPLENCIA):
         try:
             with open(ARQUIVO_ADIMPLENCIA, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:  # pylint: disable=broad-exception-caught
+        except (OSError, json.JSONDecodeError):
             return {}
     return {}
 
 
 def salvar_adimplencia(dados: dict) -> None:
-    """
-    Persiste os dados de auditoria em memória física (JSON).
-    """
-    with open(ARQUIVO_ADIMPLENCIA, "w", encoding="utf-8") as f:
+    """Persiste os dados de auditoria com Escrita Atômica Anti-Corrupção."""
+    temp_file = ARQUIVO_ADIMPLENCIA + ".tmp"
+    with open(temp_file, "w", encoding="utf-8") as f:
         json.dump(dados, f, indent=4)
+    os.replace(temp_file, ARQUIVO_ADIMPLENCIA)
 
 
 def migrar_para_adimplencia(contrato: str, info_pendente: dict, grupo: str, cota: str):
     """
-    Efetua o transbordo estrutural de um cliente pago para a fila longa.
+    Efetua o transbordo estrutural de um cliente pago para a fila longa do CDA,
+    trazendo o nome e a versão da cota desde a sua origem no sistema principal.
     """
     bd = carregar_adimplencia()
     if str(contrato) not in bd:
         cpf_cru = info_pendente.get("dados_originais", {}).get("cpf")
+        versao = info_pendente.get("versao")
+        cota_base = limpar_inteiro(cota)
+
+        cota_versao_str = (
+            f"{cota_base:04d}-{versao:02d}" if versao is not None else None
+        )
+
         bd[str(contrato)] = {
             "vendedor_nome": info_pendente.get("vendedor_nome"),
             "nome_planilha": info_pendente.get("nome_planilha"),
             "aba_original": info_pendente.get("aba_original"),
             "grupo": grupo,
-            "cota": cota,
+            "cota": str(cota_base),
+            "nome": info_pendente.get("nome"),
             "cpf": re.sub(r"\D", "", str(cpf_cru)) if cpf_cru else None,
-            "cota_versao": None,
+            "cota_versao": cota_versao_str,
             "monitorar": True,
             "ultima_verificacao": 0,
             "data_limbo": None,
@@ -161,9 +164,7 @@ def registrar_adimplencia_planilhas(
     col_inicio: str,
     col_fim: str,
 ):
-    """
-    Formata e insere dados financeiros e cadastrais na matriz das planilhas Google.
-    """
+    """Formata e insere dados financeiros e cadastrais na matriz do Google Sheets."""
     linha = cache_cda.obter_linha(sheet, contrato, col_busca)
     if linha:
         try:
@@ -182,9 +183,7 @@ def registrar_adimplencia_planilhas(
 def registrar_apenas_situacao_cliente(
     sheet, contrato: str, status_cliente: str, col_busca: int, col_situacao: int
 ):
-    """
-    Realiza atualização unitária focada na condição cadastral (Inacessível/Cancelado).
-    """
+    """Realiza atualização unitária focada apenas na coluna de situação cadastral."""
     linha = cache_cda.obter_linha(sheet, contrato, col_busca)
     if linha:
         try:
@@ -196,15 +195,26 @@ def registrar_apenas_situacao_cliente(
     return False
 
 
+def validar_morte_sessao(texto_html: str) -> bool:
+    """Audita blocos HTML retornados em busca de assinaturas de exclusão ASP."""
+    html_min = texto_html.lower()
+    gatilhos = [
+        "acesso não permitido",
+        "j_username",
+        "senha",
+        "sessão expirou",
+        "novo login",
+        "default.asp",
+        "alert('",
+        "window.top.location",
+    ]
+    return any(gatilho in html_min for gatilho in gatilhos)
+
+
 def consultar_adimplencia_http_v2(
     sessao: requests.Session, contrato: str, info: dict
 ) -> dict:
-    """
-    Algoritmo Otimizado de Extração por POST Fisiológico.
-
-    Assume que a sessão já visitou 'searchCota.asp' previamente.
-    Dribla o erro de tipagem preenchendo os IDs de pesquisa numéricos com zero.
-    """
+    """Algoritmo Otimizado de Extração por POST Fisiológico e resolução via BeautifulSoup."""
     grupo_str = str(info.get("grupo")).strip()
     cota_str = str(info.get("cota")).strip()
     cota_base_str = (
@@ -230,7 +240,6 @@ def consultar_adimplencia_http_v2(
     }
 
     try:
-        # A sessão já está estabilizada e envia diretamente o payload
         res_post = sessao.post(
             url_pesq, data=payload_otimizado, timeout=15, allow_redirects=True
         )
@@ -252,7 +261,6 @@ def consultar_adimplencia_http_v2(
             linha_clicavel = sopa.find("tr", attrs={"onclick": True})
 
             if not linha_clicavel:
-                # O servidor ASP rejeitou ou não encontrou o contrato
                 return {"encontrou": False, "motivo": "NAO_ENCONTRADO"}
 
             onclick_txt = linha_clicavel["onclick"]
@@ -262,8 +270,8 @@ def consultar_adimplencia_http_v2(
                 return {"encontrou": False, "motivo": "NAO_ENCONTRADO"}
 
             url_validacao = f"{url_base}/Attendance/{match_url_clique.group(0).strip()}"
-            match_cpf = re.search(r"cgc_cpf_cliente=(\d+)", url_validacao)
 
+            match_cpf = re.search(r"cgc_cpf_cliente=(\d+)", url_validacao)
             if match_cpf:
                 cpf_cliente = match_cpf.group(1)
 
@@ -298,7 +306,28 @@ def consultar_adimplencia_http_v2(
                 return {"encontrou": False, "motivo": "SESSAO_CAIU"}
 
         parcelas_pagas = 0
+        versao_cota = None
+        nome_cliente = None
         sopa_painel = BeautifulSoup(html_painel, "html.parser")
+
+        td_header = sopa_painel.find(
+            lambda tag: tag.name == "td"
+            and "Grupo:" in tag.text
+            and "Versão:" in tag.text
+        )
+        if td_header:
+            strongs = td_header.find_all("strong")
+            if len(strongs) >= 3:
+                versao_cota = limpar_inteiro(strongs[2].text)
+
+        td_nome = sopa_painel.find(
+            lambda tag: tag.name == "td" and "Consorciado:" in tag.text
+        )
+        if td_nome:
+            td_valor_nome = td_nome.find_next_sibling("td")
+            if td_valor_nome:
+                nome_cliente = td_valor_nome.text.strip()
+
         td_parcelas = sopa_painel.find(
             lambda tag: tag.name == "td" and "Parcelas Pagas:" in tag.text
         )
@@ -361,8 +390,10 @@ def consultar_adimplencia_http_v2(
             "encontrou": True,
             "motivo": "SUCESSO",
             "cpf": cpf_cliente,
+            "nome": nome_cliente,
             "status_pagamento": status_pagamento,
             "parcelas_pagas": parcelas_pagas,
+            "versao": versao_cota,
         }
 
     except Exception:  # pylint: disable=broad-exception-caught
@@ -371,22 +402,20 @@ def consultar_adimplencia_http_v2(
 
 def mapear_relatorios_via_http(sessao: requests.Session) -> dict:
     """
-    Descarrega o relatório de abstenção da Autocred, processando o DOM HTML
-    onde o Grupo reside na primeira coluna e a Cota/Versão na segunda.
+    Descarrega os relatórios da Autocred, estruturando o DOM HTML para
+    guardar o Status e o Nome do Consorciado de forma mapeável na RAM.
     """
     mapa = {}
     alvos = {"1030": "CANCELADO", "11345": "DESISTENTE"}
     url_base = "https://intranet.consorciotradicao.com.br/autocred"
 
-    # 1. Warmup Estrito para validação do módulo de relatórios do ASP
     url_rel_home = f"{url_base}/plugins/Relatorio_Carteiras/Relatorios/home.asp"
     try:
         sessao.get(url_rel_home, timeout=10)
     except Exception:  # pylint: disable=broad-exception-caught
-        logger.error("    [RELATÓRIOS] Falha ao aceder ao menu pai dos relatórios.")
+        logger.error("    [RELATÓRIOS] Falha ao acessar o menu pai dos relatórios.")
         return mapa
 
-    # 2. Leitura dos Relatórios de Inatividade
     for codigo_form, status in alvos.items():
         url_relatorio = (
             f"{url_base}/plugins/Relatorio_Carteiras/Relatorios/"
@@ -401,32 +430,29 @@ def mapear_relatorios_via_http(sessao: requests.Session) -> dict:
                 sopa = BeautifulSoup(resposta.text, "html.parser")
                 linhas_encontradas = 0
 
-                # O HTML da Autocred distribui os dados em colunas separadas
                 for linha in sopa.find_all("tr"):
                     colunas = linha.find_all("td")
 
-                    # Garantir que a linha tem pelo menos o Grupo (col 0) e Cota (col 1)
-                    if colunas and len(colunas) >= 2:
+                    if colunas and len(colunas) >= 3:
                         txt_grupo = colunas[0].text.strip()
                         txt_cota_versao = colunas[1].text.strip()
+                        nome_cliente = " ".join(colunas[2].text.upper().split())
 
-                        # Extrai todos os dígitos da coluna do Grupo (ex: " 000608" -> "608")
                         g_limpo = re.sub(r"\D", "", txt_grupo)
                         if not g_limpo:
                             continue
 
-                        # Extrai a Cota e a Versão da segunda coluna (ex: "0754 - 03")
                         match_cota = re.search(r"(\d+)\s*-\s*(\d+)", txt_cota_versao)
 
                         if match_cota:
                             g_id = int(g_limpo)
                             c_id = int(match_cota.group(1))
                             v_id = int(match_cota.group(2))
-                            mapa[(g_id, c_id, v_id)] = status
+                            mapa[(g_id, c_id, v_id)] = (status, nome_cliente)
                             linhas_encontradas += 1
 
                 logger.info(
-                    "    [RELATÓRIOS] Form %s carregado. Encontrados %d inativos válidos.",
+                    "    [RELATÓRIOS] Form %s carregado. Encontrados %d registros.",
                     codigo_form,
                     linhas_encontradas,
                 )
@@ -435,6 +461,6 @@ def mapear_relatorios_via_http(sessao: requests.Session) -> dict:
                     "    [RELATÓRIOS] Acesso rejeitado ao formulário %s.", codigo_form
                 )
         except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.error("    [RELATÓRIOS] Erro ao descarregar %s: %s", codigo_form, e)
+            logger.error("    [RELATÓRIOS] Erro ao baixar %s: %s", codigo_form, e)
 
     return mapa
