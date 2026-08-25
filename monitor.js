@@ -27,6 +27,9 @@ let pendentesAprovacao = {};
 let filaRetentativas = [];   
 let sistemaIniciado = false;
 
+// [NOVA TRAVA] - Bloqueia contratos duplicados na memória instantaneamente
+let contratosEmProcessamento = new Set(); 
+
 const logger = winston.createLogger({
     level: 'info',
     format: winston.format.combine(
@@ -129,8 +132,12 @@ setInterval(async () => {
     if (filaRetentativas.length > 0) {
         const item = filaRetentativas.shift();
         
+        // Tranca a memória novamente ao reprocessar para evitar colisões externas
+        contratosEmProcessamento.add(item.dadosVenda.contrato);
+        
         const msgProcessandoRetry = `[PROCESSANDO RETENTATIVA]\nO contrato ${item.dadosVenda.contrato} do vendedor ${item.dadosVenda.vendedor} está sendo reanalisado...`;
         logger.info(msgProcessandoRetry);
+        try { item.loadingMsg.edit(msgProcessandoRetry); } catch(e) {}
         notificarAdmin(msgProcessandoRetry);
         
         try {
@@ -143,7 +150,9 @@ setInterval(async () => {
             const nomeCliente = resposta.data.nome_cliente || "Não informado";
             
             const msgSucessoRetry = `[REGISTRADO] Contrato validado com sucesso (após retentativa).\n\nContrato: ${item.dadosVenda.contrato}\nCliente: ${nomeCliente}\nVendedor: ${item.dadosVenda.vendedor}\nPlanilha: ${planilha}\nStatus: ${status}`;
-            item.loadingMsg.edit(msgSucessoRetry);
+            
+            try { item.loadingMsg.edit(msgSucessoRetry); } catch(e) {}
+            if (item.idSessaoRemetente) client.sendMessage(item.idSessaoRemetente, msgSucessoRetry);
             notificarAdmin(msgSucessoRetry);
             
         } catch (erroApi) {
@@ -155,32 +164,40 @@ setInterval(async () => {
 
                 if (tipoErro === 'duplicidade') {
                     const msgDupRetry = `[REGISTRADO] ${msgTratada}\n\nVendedor: ${item.dadosVenda.vendedor}`;
-                    item.loadingMsg.edit(msgDupRetry);
+                    try { item.loadingMsg.edit(msgDupRetry); } catch(e) {}
+                    if (item.idSessaoRemetente) client.sendMessage(item.idSessaoRemetente, msgDupRetry);
                     notificarAdmin(msgDupRetry);
                     logger.info(`Retentativa cancelada: Contrato ${item.dadosVenda.contrato} já se encontrava registrado.`);
+                    contratosEmProcessamento.delete(item.dadosVenda.contrato);
                     return; 
                 } else if (tipoErro === 'planilha_ausente') {
                     const msgPlanRetry = `[ERRO DE SISTEMA] Falha definitiva na retentativa.\n\nVendedor: ${item.dadosVenda.vendedor}\nDetalhe: ${msgTratada}\n\nO bot não tentará novamente até que as planilhas sejam criadas.`;
-                    item.loadingMsg.edit(msgPlanRetry);
+                    try { item.loadingMsg.edit(msgPlanRetry); } catch(e) {}
+                    if (item.idSessaoRemetente) client.sendMessage(item.idSessaoRemetente, msgPlanRetry);
                     notificarAdmin(msgPlanRetry);
                     logger.error(`Retentativa abortada por falha de infraestrutura.`);
+                    contratosEmProcessamento.delete(item.dadosVenda.contrato);
                     return; 
                 }
             }
 
             item.tentativas += 1;
-            if (item.tentativas < 3) {
+            if (item.tentativas < 2) {
                 filaRetentativas.push(item);
                 logger.warn(`Falha na retentativa ${item.dadosVenda.contrato}. Devolvido para a fila. Detalhe: ${msgTratada}`);
             } else {
-                const msgFalhaRetry = `[ERRO] Falha definitiva ao processar contrato após 3 tentativas em background.\n\nContrato: ${item.dadosVenda.contrato}\nVendedor: ${item.dadosVenda.vendedor}\nÚltimo Erro: ${msgTratada}`;
-                item.loadingMsg.edit(msgFalhaRetry);
+                const msgFalhaRetry = `[ERRO] Falha definitiva ao processar contrato após 2 tentativas em background.\n\nContrato: ${item.dadosVenda.contrato}\nVendedor: ${item.dadosVenda.vendedor}\nÚltimo Erro: ${msgTratada}`;
+                try { item.loadingMsg.edit(msgFalhaRetry); } catch(e) {}
+                if (item.idSessaoRemetente) client.sendMessage(item.idSessaoRemetente, msgFalhaRetry);
                 notificarAdmin(msgFalhaRetry);
                 logger.error(`Abandono de retentativa para o contrato ${item.dadosVenda.contrato}.`);
             }
+        } finally {
+            // Destranca a memória após a retentativa finalizar (sucesso ou falha)
+            contratosEmProcessamento.delete(item.dadosVenda.contrato);
         }
     }
-}, 30000); 
+}, 15000); 
 
 async function processarMensagem(msg) {
     try {
@@ -278,6 +295,15 @@ async function processarMensagem(msg) {
         const dadosVenda = extrairDados(corpoMsg);
         
         if (dadosVenda) {
+
+            // [NOVO] TRAVA DE CORRIDA (RACE CONDITION)
+            if (contratosEmProcessamento.has(dadosVenda.contrato)) {
+                logger.warn(`Contrato ${dadosVenda.contrato} descartado sumariamente. Já está em processamento concorrente.`);
+                return; 
+            }
+            // Tranca a porta para este contrato
+            contratosEmProcessamento.add(dadosVenda.contrato);
+
             let numeroIdentificador = mapaLids[idSessaoBruto];
             
             if (isAdmin) {
@@ -313,7 +339,9 @@ async function processarMensagem(msg) {
                     const nomeCliente = respostaApp.data.nome_cliente || "Não informado";
                     
                     const msgSucesso = `[REGISTRADO] Contrato validado com sucesso.\n\nContrato: ${dadosVenda.contrato}\nCliente: ${nomeCliente}\nVendedor: ${nomeVendedor}\nPlanilha: ${planilha}\nStatus: ${status}`;
-                    loadingMsg.edit(msgSucesso);
+                    
+                    try { loadingMsg.edit(msgSucesso); } catch(e) {}
+                    client.sendMessage(idSessaoBruto, msgSucesso);
                     notificarAdmin(msgSucesso);
 
                 } catch (erroApi) {
@@ -323,40 +351,50 @@ async function processarMensagem(msg) {
 
                         if (tipoErro === 'duplicidade') {
                             const msgDup = `[REGISTRADO] ${msgErro}\n\nVendedor: ${nomeVendedor}`;
-                            loadingMsg.edit(msgDup);
+                            try { loadingMsg.edit(msgDup); } catch(e) {}
+                            client.sendMessage(idSessaoBruto, msgDup); 
                             notificarAdmin(msgDup);
                             logger.info(`Contrato ${dadosVenda.contrato} ignorado na fila. Motivo: Duplicidade (409).`);
                         
                         } else if (tipoErro === 'planilha_ausente') {
                             const msgPlan = `[ERRO DE SISTEMA] ${msgErro}\n\nVendedor: ${nomeVendedor}\n\nCrie as planilhas ou abas ausentes e reenvie a mensagem para tentar novamente.`;
-                            loadingMsg.edit(msgPlan);
+                            try { loadingMsg.edit(msgPlan); } catch(e) {}
+                            client.sendMessage(idSessaoBruto, msgPlan); 
                             notificarAdmin(msgPlan);
                             logger.error(`Falha de infraestrutura no contrato ${dadosVenda.contrato}.`);
                         
                         } else if (tipoErro === 'contrato_nao_encontrado') {
                             logger.warn(`Contrato ${dadosVenda.contrato} não encontrado no portal. Transferindo para fila de resiliência.`);
-                            filaRetentativas.push({ dadosVenda, loadingMsg, tentativas: 0 });
+                            // [NOVO] Guardando idSessaoRemetente para avisar o vendedor se a retentativa falhar depois
+                            filaRetentativas.push({ dadosVenda, loadingMsg, tentativas: 0, idSessaoRemetente: idSessaoBruto }); 
                             const msgNaoEnc = `[AVISO] ${msgErro}\n\nVendedor: ${nomeVendedor}\n\nO bot tentará encontrar o contrato novamente em background (esperando o portal atualizar).`;
-                            loadingMsg.edit(msgNaoEnc);
+                            try { loadingMsg.edit(msgNaoEnc); } catch(e) {}
+                            client.sendMessage(idSessaoBruto, msgNaoEnc); 
                             notificarAdmin(msgNaoEnc);
                         
                         } else {
                             logger.error(`Falha no contrato ${dadosVenda.contrato} (${tipoErro}). Transferindo para resiliência.`);
-                            filaRetentativas.push({ dadosVenda, loadingMsg, tentativas: 0 });
+                            filaRetentativas.push({ dadosVenda, loadingMsg, tentativas: 0, idSessaoRemetente: idSessaoBruto }); 
                             const msgFalha = `[AVISO] Lentidão ou falha de gravação detectada.\nDetalhe: ${msgErro}\n\nVendedor: ${nomeVendedor}\n\nO bot transferiu o contrato para a fila de retentativas.`;
-                            loadingMsg.edit(msgFalha);
+                            try { loadingMsg.edit(msgFalha); } catch(e) {}
+                            client.sendMessage(idSessaoBruto, msgFalha); 
                             notificarAdmin(msgFalha);
                         }
                     } else {
                         logger.error(`Falha de comunicação offline no contrato ${dadosVenda.contrato}. Transferindo para fila de resiliência.`);
-                        filaRetentativas.push({ dadosVenda, loadingMsg, tentativas: 0 });
+                        filaRetentativas.push({ dadosVenda, loadingMsg, tentativas: 0, idSessaoRemetente: idSessaoBruto }); 
                         const msgOffline = `[AVISO] Falha de comunicação com o motor Python. O bot tentará registrar o contrato ${dadosVenda.contrato} novamente em background.\n\nVendedor: ${nomeVendedor}`;
-                        loadingMsg.edit(msgOffline);
+                        try { loadingMsg.edit(msgOffline); } catch(e) {}
+                        client.sendMessage(idSessaoBruto, msgOffline); 
                         notificarAdmin(msgOffline);
                     }
+                } finally {
+                    // DESTRANCA A MEMÓRIA independente do desfecho
+                    contratosEmProcessamento.delete(dadosVenda.contrato);
                 }
 
             } else {
+                contratosEmProcessamento.delete(dadosVenda.contrato);
                 msg.reply(`[AVISO] Contrato detectado, mas o usuário não possui permissão.\nPor favor, envie o seu número entre hífens para solicitar acesso ao administrador:\n*-556799999999-*\n\nNota: Não inclua o 9 adicional do WhatsApp no número.`);
             }
         }
