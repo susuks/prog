@@ -1,8 +1,8 @@
 """
 Motor Principal de Automação de Consórcio V6 (Enterprise).
 
-Implementa arquitetura de microsserviços internos com instâncias concorrentes
-do WebDriver, gestão diferencial de estado (Delta Updates) e segregação de logs.
+Implementa arquitetura de microsserviços internos, atuando exclusivamente como
+uma API REST de ingestão de dados. Extrai dados via Selenium e injeta no JSON Unificado.
 """
 
 import time
@@ -19,11 +19,9 @@ from gerador_dados import (
     conectar_google_sheets,
     atualizar_planilha_vendedor,
     atualizar_planilha_geral,
-    carregar_pendentes,
-    salvar_pendentes,
     salvar_historico_concluido,
     verificar_contrato_registrado,
-    adicionar_para_reanalise,
+    registrar_contrato_unificado,
     TEMPO_INATIVIDADE_MAXIMO,
 )
 
@@ -35,14 +33,11 @@ from motor_navegacao import (
     fazer_login_com_ia,
 )
 
-from cda_modulos import migrar_para_adimplencia
-
 # ============================================================================
-# CONFIGURAÇÃO DE LOGGING ESTRUTURADO ROTATIVO (SEGREGAÇÃO)
+# CONFIGURAÇÃO DE LOGGING ESTRUTURADO ROTATIVO
 # ============================================================================
 log_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 
-# Logger Principal (API e Background de 1ª Parcela)
 logger_api = logging.getLogger("EnterpriseAPI")
 logger_api.setLevel(logging.INFO)
 handler_api = RotatingFileHandler(
@@ -60,10 +55,7 @@ logger_api.addHandler(logging.StreamHandler())
 # ============================================================================
 app = Flask(__name__)
 
-# Instâncias independentes para concorrência
 driver_api = None
-
-# Bloqueio estrito apenas para os processos que partilham o driver_api
 lock_api = threading.Lock()
 TOKEN_API_ESPERADO = "Bearer CHAVE_SECRETA_ENTERPRISE_V6"
 
@@ -104,7 +96,7 @@ def garantir_sessao(driver_alvo, estado_alvo, logger_alvo):
 def processar_venda():
     """
     Endpoint HTTP POST. Realiza a validação do Bearer Token, previne a
-    duplicidade de contratos e comanda o motor Selenium.
+    duplicidade de contratos e comanda o motor de ingestão Selenium.
     """
     auth_header = request.headers.get("Authorization")
     if auth_header != TOKEN_API_ESPERADO:
@@ -122,11 +114,20 @@ def processar_venda():
 
     logger_api.info("API RECEBIDA | Contrato: %s | Vendedor: %s", contrato, vendedor)
 
-    if verificar_contrato_registrado(contrato):
-        logger_api.info("RECUSADO | O contrato %s já consta no sistema.", contrato)
-        return jsonify({"erro": "duplicidade", "mensagem": "Já processado."}), 409
-
     with lock_api:
+
+        if verificar_contrato_registrado(contrato):
+            logger_api.info("RECUSADO | O contrato %s já consta no sistema.", contrato)
+            return (
+                jsonify(
+                    {
+                        "erro": "duplicidade",
+                        "mensagem": f"O contrato {contrato} já foi gravado no sistema.",
+                    }
+                ),
+                409,
+            )
+
         try:
             nome_planilha_vendedor = f"{PREFIXO_PLANILHA}{vendedor}"
             nome_planilha_geral = f"{PREFIXO_PLANILHA}GERAL"
@@ -185,44 +186,30 @@ def processar_venda():
                         else "1º Parcela Não Paga"
                     )
 
-                    salvar_historico_concluido(
-                        contrato,
-                        nome_planilha_vendedor,
-                        vendedor,
-                        telefone_vendedor,
-                        texto_st,
+                    if dados_site.get("pago"):
+                        salvar_historico_concluido(
+                            contrato,
+                            nome_planilha_vendedor,
+                            vendedor,
+                            telefone_vendedor,
+                            texto_st,
+                        )
+
+                    # Injeção Direta na Memória de Monitoramento (Substitui as filas pendentes)
+                    registrar_contrato_unificado(
+                        contrato=contrato,
+                        vendedor_nome=vendedor,
+                        nome_planilha=nome_planilha_vendedor,
+                        vendedor_tel=telefone_vendedor,
+                        origem=origem,
+                        dados_site=dados_site,
+                        aba_original=aba_atual,
                     )
 
                     logger_api.info(
-                        "[SUCESSO API] Contrato %s gravado no sistema.", contrato
+                        "[SUCESSO API] Contrato %s gravado e inserido na base unificada.",
+                        contrato,
                     )
-
-                    if not dados_site.get("pago"):
-                        adicionar_para_reanalise(
-                            contrato,
-                            vendedor,
-                            nome_planilha_vendedor,
-                            telefone_vendedor,
-                            origem,
-                            dados,
-                            aba_atual,
-                            nome_cliente=dados_site.get("nome"),
-                            versao=dados_site.get("versao"),
-                        )
-                    else:
-                        migrar_para_adimplencia(
-                            contrato,
-                            {
-                                "vendedor_nome": vendedor,
-                                "nome_planilha": nome_planilha_vendedor,
-                                "aba_original": aba_atual,
-                                "nome": dados_site.get("nome"),
-                                "versao": dados_site.get("versao"),
-                                "dados_originais": dados,
-                            },
-                            str(dados_site.get("grupo", "")),
-                            str(dados_site.get("cota", "")),
-                        )
 
                     return (
                         jsonify(
@@ -264,184 +251,31 @@ def processar_venda():
 
 
 # ============================================================================
-# ROTINA DE BACKGROUND (REANÁLISE DE 1 HORA / 30 DIAS)
+# ROTINA DE BACKGROUND (HEARTBEAT / KEEP-ALIVE)
 # ============================================================================
-def loop_reanalise_background():
+def loop_keep_alive():
     """
-    Varre a fila de 1ª parcela, operando exclusivamente na instância driver_api.
-    Protegido contra condições de corrida através do recarregamento de estado
-    diretamente na memória física por iteração.
+    Thread microscópica dedicada exclusivamente a manter a sessão ASP viva
+    durante períodos de ociosidade sem vendas, poupando chamadas à API da CapSolver.
     """
-    logger_api.info("Motor de Reanálise Independente Iniciado.")
-
+    logger_api.info("Motor de Keep-Alive Iniciado.")
     while True:
         time.sleep(60)
-
-        try:
-            # 1. Limpeza de Expirados (Rápida e Isolada)
-            pend_limpeza = carregar_pendentes()
-            if not pend_limpeza:
-                continue
-
-            agora = time.time()
-            mudou_limpeza = False
-            for contrato, info in list(pend_limpeza.items()):
-                data_inclusao = info.get("data_inclusao", agora)
-                if "data_inclusao" not in info:
-                    info["data_inclusao"] = data_inclusao
-                    mudou_limpeza = True
-
-                # Expira ao fim de 30 dias
-                if agora - data_inclusao > 2592000:
-                    logger_api.warning(
-                        "EXPIROU | Contrato %s atingiu limite de 30 dias. Removido.",
-                        contrato,
-                    )
-                    del pend_limpeza[contrato]
-                    mudou_limpeza = True
-
-            if mudou_limpeza:
-                salvar_pendentes(pend_limpeza)
-
-            # 2. Varredura Protegida Contra Condição de Corrida
-            chaves_para_verificar = list(carregar_pendentes().keys())
-
-            for contrato in chaves_para_verificar:
-                pendentes_frescos = carregar_pendentes()
-
-                if contrato not in pendentes_frescos:
-                    continue
-
-                info = pendentes_frescos[contrato]
-                ultima_verificacao = info.get("ultima_verificacao", 0)
-
-                if time.time() - ultima_verificacao < 3600:
-                    continue
-
-                with lock_api:
-                    if not ESTADO_API["autenticado"]:
-                        try:
-                            garantir_sessao(driver_api, ESTADO_API, logger_api)
-                        except Exception:  # pylint: disable=broad-exception-caught
-                            continue
-
-                    ESTADO_API["ultimo_keep_alive"] = time.time()
-                    logger_api.info("REANÁLISE | Verificando %s...", contrato)
-
-                    sucesso_verificacao = False
-                    pago = False
-                    dados_completos = None
-
-                    try:
-                        if buscar_contrato(driver_api, contrato):
-                            dados_completos = extrair_dados_completos(driver_api)
-                            if dados_completos and dados_completos.get("pago"):
-                                pago = True
-                            sucesso_verificacao = True
-                        else:
-                            logger_api.warning(
-                                "NÃO ENCONTRADO | Cota %s temporariamente indisponível no portal.",
-                                contrato,
-                            )
-                            info["falhas_site"] = info.get("falhas_site", 0) + 1
-                            pendentes_frescos[contrato]["falhas_site"] = info[
-                                "falhas_site"
-                            ]
-                            pendentes_frescos[contrato][
-                                "ultima_verificacao"
-                            ] = time.time()
-                            salvar_pendentes(pendentes_frescos)
-                            sucesso_verificacao = False
-                    except (
-                        Exception  # pylint: disable=broad-exception-caught
-                    ) as e_indiv:
-                        logger_api.error(
-                            "Erro ao verificar pendente %s: %s", contrato, e_indiv
+        with lock_api:
+            if ESTADO_API["autenticado"]:
+                tempo_inativo = time.time() - ESTADO_API["ultimo_keep_alive"]
+                if tempo_inativo > TEMPO_INATIVIDADE_MAXIMO:
+                    if not manter_sessao_viva(driver_api):
+                        logger_api.warning(
+                            "Keep-Alive falhou. O sistema forçará re-login na próxima venda."
+                        )
+                        ESTADO_API["autenticado"] = False
+                    else:
+                        logger_api.info(
+                            "    [SISTEMA] Keep-Alive executado (Sessão preservada)."
                         )
 
-                    if sucesso_verificacao:
-                        pend_final = carregar_pendentes()
-                        if contrato in pend_final:
-                            if pago:
-                                logger_api.info(
-                                    "PAGAMENTO DETECTADO | Contrato %s.", contrato
-                                )
-
-                                aba_salva = info.get("aba_original", obter_mes_utc4())
-
-                                from gerador_dados import encontrar_linha_do_contrato
-
-                                sheet_v = conectar_google_sheets(
-                                    info["nome_planilha"], aba_salva
-                                )
-                                sheet_g_ano = conectar_google_sheets(
-                                    f"{PREFIXO_PLANILHA}GERAL", NOME_ABA_GERAL
-                                )
-
-                                if sheet_v and sheet_g_ano:
-                                    l_v = encontrar_linha_do_contrato(
-                                        sheet_v, contrato, 13
-                                    )
-                                    l_g_ano = encontrar_linha_do_contrato(
-                                        sheet_g_ano, contrato, 12
-                                    )
-
-                                    if l_v and l_g_ano:
-                                        try:
-                                            sheet_v.update_cell(
-                                                l_v, 2, "1º Parcela Paga"
-                                            )
-                                            sheet_g_ano.update_cell(
-                                                l_g_ano, 1, "1º Parcela Paga"
-                                            )
-
-                                            salvar_historico_concluido(
-                                                contrato,
-                                                info["nome_planilha"],
-                                                info["vendedor_nome"],
-                                                info["vendedor_tel"],
-                                                "1º Parcela Paga (Reanálise)",
-                                            )
-                                            migrar_para_adimplencia(
-                                                contrato,
-                                                info,
-                                                str(dados_completos.get("grupo", "")),
-                                                str(dados_completos.get("cota", "")),
-                                            )
-                                            del pend_final[contrato]
-                                            logger_api.info(
-                                                "[SUCESSO REANÁLISE] Contrato %s transferido ao CDA.",
-                                                contrato,
-                                            )
-                                        except (
-                                            Exception  # pylint: disable=broad-exception-caught
-                                        ) as e_sheet:
-                                            logger_api.error(
-                                                "Falha ao gravar sucesso do contrato %s: %s",
-                                                contrato,
-                                                e_sheet,
-                                            )
-                            else:
-                                pend_final[contrato]["ultima_verificacao"] = time.time()
-                                pend_final[contrato]["tentativas"] = (
-                                    pend_final[contrato].get("tentativas", 0) + 1
-                                )
-
-                            salvar_pendentes(pend_final)
-
-            with lock_api:
-                if ESTADO_API["autenticado"]:
-                    tempo_inativo = time.time() - ESTADO_API["ultimo_keep_alive"]
-                    if tempo_inativo > TEMPO_INATIVIDADE_MAXIMO:
-                        if not manter_sessao_viva(driver_api):
-                            logger_api.warning(
-                                "Keep-Alive falhou. Necessário Relogin futuro."
-                            )
-                            ESTADO_API["autenticado"] = False
-                        ESTADO_API["ultimo_keep_alive"] = time.time()
-
-        except Exception as e_bg:  # pylint: disable=broad-exception-caught
-            logger_api.error("Erro no loop de background: %s", str(e_bg))
+                    ESTADO_API["ultimo_keep_alive"] = time.time()
 
 
 if __name__ == "__main__":
@@ -459,7 +293,8 @@ if __name__ == "__main__":
             "Não foi possível acessar o portal de forma automatizada: %s", e_inicial
         )
 
-    threading.Thread(target=loop_reanalise_background, daemon=True).start()
+    # Inicia a Thread do Keep-Alive
+    threading.Thread(target=loop_keep_alive, daemon=True).start()
 
     logger_api.info(
         "Servidor WSGI de produção (Waitress) iniciado com sucesso na porta 5000."

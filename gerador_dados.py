@@ -23,7 +23,8 @@ logger = logging.getLogger("EnterpriseBot")
 ARQUIVO_FILA = "files/fila_vendas.csv"
 ARQUIVO_EM_PROCESSAMENTO = "files/temp_processando.csv"
 ARQUIVO_HISTORICO_SUCESSO = "files/historico_concluidos.csv"
-ARQUIVO_PENDENTES = "files/pendentes_reanalise.json"
+ARQUIVO_ADIMPLENCIA = "files/adimplencia.json"
+ARQUIVO_EXPIRADOS = "files/expirados.json"
 ARQUIVO_CACHE_PLANILHAS = "files/cache_planilhas.json"
 ARQUIVO_CONFIG = "files/config.txt"
 
@@ -92,7 +93,6 @@ def obter_mes_utc4() -> str:
     return meses_pt[agora.month]
 
 
-# Inicialização em tempo de importação para uso global
 CONFIG = carregar_configuracoes()
 USUARIO_LOGIN = CONFIG.get("MATRICULA")
 SENHA_LOGIN = CONFIG.get("SENHA")
@@ -131,44 +131,61 @@ def limpar_valor(texto: str) -> float:
 
 
 # ============================================================================
-# MANIPULAÇÃO DE ARQUIVOS LOCAIS (JSON / CSV)
+# MANIPULAÇÃO DE ARQUIVOS LOCAIS UNIFICADA (JSON / CSV)
 # ============================================================================
-def carregar_pendentes() -> dict:
-    """
-    Carrega o arquivo JSON que armazena os contratos na fila de reanálise.
-    """
-    if os.path.exists(ARQUIVO_PENDENTES):
+def carregar_adimplencia() -> dict:
+    """Carrega o arquivo JSON unificado de auditorias do sistema."""
+    if os.path.exists(ARQUIVO_ADIMPLENCIA):
         try:
-            with open(ARQUIVO_PENDENTES, "r", encoding="utf-8") as f:
+            with open(ARQUIVO_ADIMPLENCIA, "r", encoding="utf-8") as f:
                 return json.load(f)
         except (OSError, json.JSONDecodeError):
             return {}
     return {}
 
 
-def salvar_pendentes(dados: dict) -> None:
-    """
-    Grava as alterações usando Escrita Atômica Anti-Corrupção.
-    """
-    temp_file = ARQUIVO_PENDENTES + ".tmp"
+def salvar_adimplencia(dados: dict) -> None:
+    """Persiste os dados de auditoria com Escrita Anti-Corrupção."""
+    temp_file = ARQUIVO_ADIMPLENCIA + ".tmp"
     with open(temp_file, "w", encoding="utf-8") as f:
         json.dump(dados, f, indent=4)
-    os.replace(temp_file, ARQUIVO_PENDENTES)
+    os.replace(temp_file, ARQUIVO_ADIMPLENCIA)
+
+
+def carregar_expirados() -> dict:
+    """Carrega o arquivo JSON de vendas perdidas (Não pagaram 1ª parcela em 30 dias)."""
+    if os.path.exists(ARQUIVO_EXPIRADOS):
+        try:
+            with open(ARQUIVO_EXPIRADOS, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return {}
+    return {}
+
+
+def salvar_expirados(dados: dict) -> None:
+    """Grava as alterações no arquivo JSON de contratos expirados."""
+    temp_file = ARQUIVO_EXPIRADOS + ".tmp"
+    with open(temp_file, "w", encoding="utf-8") as f:
+        json.dump(dados, f, indent=4)
+    os.replace(temp_file, ARQUIVO_EXPIRADOS)
 
 
 def verificar_contrato_registrado(contrato: str) -> bool:
     """
-    Consulta a memória local (pendentes e histórico) para evitar duplicidade.
+    Consulta a memória local estrita (Adimplência, Expirados e Histórico)
+    para evitar duplicidade absoluta no sistema.
     """
-    pendentes = carregar_pendentes()
-    if str(contrato) in pendentes:
+    if str(contrato) in carregar_adimplencia():
+        return True
+
+    if str(contrato) in carregar_expirados():
         return True
 
     if os.path.exists(ARQUIVO_HISTORICO_SUCESSO):
         try:
             with open(ARQUIVO_HISTORICO_SUCESSO, "r", encoding="utf-8") as f:
-                conteudo = f.read()
-                if str(contrato) in conteudo:
+                if str(contrato) in f.read():
                     return True
         except OSError:
             pass
@@ -176,38 +193,46 @@ def verificar_contrato_registrado(contrato: str) -> bool:
     return False
 
 
-def adicionar_para_reanalise(
+def registrar_contrato_unificado(
     contrato: str,
     vendedor_nome: str,
     nome_planilha: str,
     vendedor_tel: str,
     origem: str,
-    dados_completos: dict,
+    dados_site: dict,
     aba_original: str,
-    nome_cliente: str = None,
-    versao: int = None,
 ) -> None:
     """
-    Registra um contrato pendente de pagamento na memória de curto prazo (JSON),
-    incluindo a data de inclusão e a aba original para controle preciso.
+    Substitui as antigas filas pendentes e migrações. Registra o contrato
+    diretamente no JSON definitivo, formatando matematicamente Cota e Versão.
     """
-    pendentes = carregar_pendentes()
-    pendentes[contrato] = {
+    adimplencia = carregar_adimplencia()
+
+    cpf_cru = dados_site.get("cpf")
+    versao = dados_site.get("versao")
+
+    adimplencia[str(contrato)] = {
         "vendedor_nome": vendedor_nome,
-        "nome_planilha": nome_planilha,
         "vendedor_tel": vendedor_tel,
         "origem": origem,
-        "nome": nome_cliente,
-        "versao": versao,
-        "tentativas": 0,
-        "ultima_verificacao": time.time(),
-        "data_inclusao": time.time(),
-        "dados_originais": dados_completos,
+        "nome_planilha": nome_planilha,
         "aba_original": aba_original,
+        "grupo": limpar_inteiro(dados_site.get("grupo", "")),
+        "cota": limpar_inteiro(dados_site.get("cota", "")),
+        "versao": limpar_inteiro(versao) if versao is not None else None,
+        "nome": dados_site.get("nome", ""),
+        "cpf": re.sub(r"\D", "", str(cpf_cru)) if cpf_cru else None,
+        "primeira_parcela_paga": dados_site.get("pago", False),
+        "data_inclusao": time.time(),
+        "monitorar": True,
+        "ultima_verificacao": 0,
+        "data_limbo": None,
+        "ultimo_status": "PAGO" if dados_site.get("pago") else "PENDENTE",
+        "ultimas_parcelas": 1 if dados_site.get("pago") else 0,
     }
-    salvar_pendentes(pendentes)
+    salvar_adimplencia(adimplencia)
     logger.info(
-        "   [AGENDADO] Contrato %s adicionado à reanálise de 30 dias (Aba: %s).",
+        "   [BASE UNIFICADA] Contrato %s registrado com sucesso (Aba: %s).",
         contrato,
         aba_original,
     )
@@ -327,7 +352,6 @@ def encontrar_proxima_linha_vazia(sheet, start_row: int, check_col: int) -> int:
     coluna_alvo = sheet.col_values(check_col)
     linha_vazia = start_row
 
-    # 1. Encontra a próxima linha disponível
     if len(coluna_alvo) >= start_row:
         for i in range(start_row - 1, len(coluna_alvo)):
             if not str(coluna_alvo[i]).strip():
@@ -336,11 +360,9 @@ def encontrar_proxima_linha_vazia(sheet, start_row: int, check_col: int) -> int:
         else:
             linha_vazia = len(coluna_alvo) + 1
 
-    # 2. Expansão Dinâmica da Grade (Prevenção de Colapso Out-of-Bounds)
     try:
-        # Se a linha de destino ultrapassar o limite atual da folha...
         if linha_vazia > sheet.row_count:
-            sheet.add_rows(500)  # Adiciona um lote de 500 linhas para criar margem
+            sheet.add_rows(500)
             logger.info(
                 "   [EXPANSÃO] O limite da aba '%s' foi atingido. "
                 "Grade expandida em +500 linhas automaticamente.",
@@ -380,6 +402,8 @@ def atualizar_planilha_vendedor(
     status_pag = "1º Parcela Paga" if dados_site.get("pago") else ""
 
     telefone_limpo = re.sub(r"\D", "", str(dados_site.get("telefone", "")))
+    if telefone_limpo and not telefone_limpo.startswith("55"):
+        telefone_limpo = f"55{telefone_limpo}"
 
     dados_cadastrais = [
         str(dados_site.get("data_venda", "")),
@@ -437,6 +461,8 @@ def atualizar_planilha_geral(
     status_pag = "1º Parcela Paga" if dados_site.get("pago") else ""
 
     telefone_limpo = re.sub(r"\D", "", str(dados_site.get("telefone", "")))
+    if telefone_limpo and not telefone_limpo.startswith("55"):
+        telefone_limpo = f"55{telefone_limpo}"
 
     dados_cadastrais = [
         str(dados_site.get("data_venda", "")),
@@ -456,7 +482,6 @@ def atualizar_planilha_geral(
     except (ValueError, TypeError):
         pass
 
-    # Restauração do Fuso Horário de Campo Grande para a Coluna R
     fuso_utc4 = timezone(timedelta(hours=-4))
     data_registro_atual = datetime.now(fuso_utc4).strftime("%d/%m/%Y")
 
@@ -470,7 +495,7 @@ def atualizar_planilha_geral(
         str(dados_site.get("estado", "")),
         str(dados_site.get("cpf", "")),
         str(row_csv.get("vendedor", "")),
-        data_registro_atual,  # Coluna R preservada
+        data_registro_atual,
     ]
 
     sheet.update_cell(linha, 1, status_pag)
@@ -485,13 +510,11 @@ def atualizar_planilha_geral(
         value_input_option="USER_ENTERED",
     )
 
-    # --- NOVO: INJEÇÃO ISOLADA DA VERSÃO NA COLUNA X (Índice 24) ---
     versao_cota = dados_site.get("versao")
     if versao_cota is not None:
         try:
             sheet.update_cell(linha, 24, f"{versao_cota:02d}")
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error("   [ERRO PLANILHA] Falha ao gravar versão na coluna X: %s", e)
-    # ---------------------------------------------------------------
 
     return status_pag

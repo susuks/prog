@@ -256,7 +256,14 @@ def extrair_dados_completos(driver: webdriver.Chrome) -> dict:
         elem_estado = WebDriverWait(driver, 5).until(
             EC.presence_of_element_located((By.ID, "ESTADO"))
         )
-        dados["estado"] = elem_estado.text.strip().upper()
+
+        # Correção: Uso do get_attribute("value") para tags de formulário <input>
+        valor_estado = elem_estado.get_attribute("value")
+
+        if not valor_estado:
+            valor_estado = elem_estado.text
+
+        dados["estado"] = valor_estado.strip().upper() if valor_estado else ""
 
     except Exception:  # pylint: disable=broad-exception-caught
         pass

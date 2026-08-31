@@ -114,7 +114,7 @@ def carregar_adimplencia() -> dict:
 
 
 def salvar_adimplencia(dados: dict) -> None:
-    """Persiste os dados de auditoria com Escrita Atômica Anti-Corrupção."""
+    """Persiste os dados de auditoria com Escrita Anti-Corrupção."""
     temp_file = ARQUIVO_ADIMPLENCIA + ".tmp"
     with open(temp_file, "w", encoding="utf-8") as f:
         json.dump(dados, f, indent=4)
@@ -243,10 +243,19 @@ def consultar_adimplencia_http_v2(
         res_post = sessao.post(
             url_pesq, data=payload_otimizado, timeout=15, allow_redirects=True
         )
+
+        # BLINDAGEM DE REDE: Se o HTML for menor que 1000 caracteres.
+        if res_post.status_code != 200 or len(res_post.text) < 1000:
+            return {"encontrou": False, "motivo": "FALHA_REDE"}
+
         html_post = res_post.text.lower()
 
         if "j_username" in html_post or "acesso não permitido" in html_post:
             return {"encontrou": False, "motivo": "SESSAO_CAIU"}
+
+        # BLINDAGEM DE BANCO DE DADOS: Captura erros de timeout SQL do servidor.
+        if "microsoft ole db" in html_post or "sql server" in html_post:
+            return {"encontrou": False, "motivo": "FALHA_REDE"}
 
         url_painel_atual = res_post.url
         cpf_cliente = None

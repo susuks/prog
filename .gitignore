@@ -23,4 +23,5 @@ files/vendedores enc.csv
 files/historico_concluidos.csv
 /importador_cda.py
 /coletor_manual.py
-/corrigir_abas.py
+/test.py
+/main_*
