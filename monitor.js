@@ -9,17 +9,18 @@ const ARQUIVO_VENDEDORES = 'files/vendedores.csv';
 const ARQUIVO_LIDS = 'files/mapeamento_lids.json';
 const ARQUIVO_ADMIN = 'files/admin_data.json';
 const ARQUIVO_CONFIG = 'files/config.txt';
+// Mantido apontamento original para o main.py na porta 5000
 const URL_API_PYTHON = 'http://127.0.0.1:5000/processar_venda';
-const TOKEN_API = 'CHAVE_SECRETA_ENTERPRISE_V6'; 
 
 const MAPA_ORIGENS = {
     "1": "DuoTalk", "2": "Tráfego", "3": "Remarketing", "4": "Contato Lucas",
     "5": "Outro", "6": "Indicação", "7": "RMKT + RMKT pessoal",
-    "8": "TRFG + RMKT pessoal", "9": "DT + RMKT pessoal",
+    "8": "TRFG + RMKT pessoal", "9": "DT + RMKT pessoal",
     "10": "Ctt.L + RMKT pessoal", "11": "Site", "12": "Contato Emanuel"
 };
 
 let NUMERO_ADMIN_CONFIG = '';
+let TOKEN_API_CONFIG = ''; // [NOVO] Token agora é carregado dinamicamente do config.txt
 let adminLid = null;
 let mapaVendedores = {};
 let mapaLids = {};
@@ -89,7 +90,14 @@ function carregarMemorias() {
         for (let linha of linhas) {
             if (linha.includes('=')) {
                 const partes = linha.split('=');
-                if (partes[0].trim() === 'NUMERO_ADMIN') NUMERO_ADMIN_CONFIG = partes[1].replace(/\D/g, '');
+                const chave = partes[0].trim();
+                const valor = partes[1].trim(); // Pega o resto e limpa espaços
+
+                if (chave === 'NUMERO_ADMIN') {
+                    NUMERO_ADMIN_CONFIG = valor.replace(/\D/g, '');
+                } else if (chave === 'TOKEN_API') {
+                    TOKEN_API_CONFIG = valor.replace(/["']/g, ""); // Puxa o Token e limpa possíveis aspas
+                }
             }
         }
     }
@@ -137,12 +145,12 @@ setInterval(async () => {
         
         const msgProcessandoRetry = `[PROCESSANDO RETENTATIVA]\nO contrato ${item.dadosVenda.contrato} do vendedor ${item.dadosVenda.vendedor} está sendo reanalisado...`;
         logger.info(msgProcessandoRetry);
-        try { item.loadingMsg.edit(msgProcessandoRetry); } catch(e) {}
         notificarAdmin(msgProcessandoRetry);
         
         try {
+            // [NOVO] Injetando a variável TOKEN_API_CONFIG carregada do config.txt
             const resposta = await axios.post(URL_API_PYTHON, item.dadosVenda, { 
-                headers: { 'Authorization': `Bearer ${TOKEN_API}` },
+                headers: { 'Authorization': `Bearer ${TOKEN_API_CONFIG}` },
                 timeout: 180000 
             });
             const status = resposta.data.status_pagamento;
@@ -151,7 +159,6 @@ setInterval(async () => {
             
             const msgSucessoRetry = `[REGISTRADO] Contrato validado com sucesso (após retentativa).\n\nContrato: ${item.dadosVenda.contrato}\nCliente: ${nomeCliente}\nVendedor: ${item.dadosVenda.vendedor}\nPlanilha: ${planilha}\nStatus: ${status}`;
             
-            try { item.loadingMsg.edit(msgSucessoRetry); } catch(e) {}
             if (item.idSessaoRemetente) client.sendMessage(item.idSessaoRemetente, msgSucessoRetry);
             notificarAdmin(msgSucessoRetry);
             
@@ -164,7 +171,6 @@ setInterval(async () => {
 
                 if (tipoErro === 'duplicidade') {
                     const msgDupRetry = `[REGISTRADO] ${msgTratada}\n\nVendedor: ${item.dadosVenda.vendedor}`;
-                    try { item.loadingMsg.edit(msgDupRetry); } catch(e) {}
                     if (item.idSessaoRemetente) client.sendMessage(item.idSessaoRemetente, msgDupRetry);
                     notificarAdmin(msgDupRetry);
                     logger.info(`Retentativa cancelada: Contrato ${item.dadosVenda.contrato} já se encontrava registrado.`);
@@ -172,7 +178,6 @@ setInterval(async () => {
                     return; 
                 } else if (tipoErro === 'planilha_ausente') {
                     const msgPlanRetry = `[ERRO DE SISTEMA] Falha definitiva na retentativa.\n\nVendedor: ${item.dadosVenda.vendedor}\nDetalhe: ${msgTratada}\n\nO bot não tentará novamente até que as planilhas sejam criadas.`;
-                    try { item.loadingMsg.edit(msgPlanRetry); } catch(e) {}
                     if (item.idSessaoRemetente) client.sendMessage(item.idSessaoRemetente, msgPlanRetry);
                     notificarAdmin(msgPlanRetry);
                     logger.error(`Retentativa abortada por falha de infraestrutura.`);
@@ -187,7 +192,6 @@ setInterval(async () => {
                 logger.warn(`Falha na retentativa ${item.dadosVenda.contrato}. Devolvido para a fila. Detalhe: ${msgTratada}`);
             } else {
                 const msgFalhaRetry = `[ERRO] Falha definitiva ao processar contrato após 2 tentativas em background.\n\nContrato: ${item.dadosVenda.contrato}\nVendedor: ${item.dadosVenda.vendedor}\nÚltimo Erro: ${msgTratada}`;
-                try { item.loadingMsg.edit(msgFalhaRetry); } catch(e) {}
                 if (item.idSessaoRemetente) client.sendMessage(item.idSessaoRemetente, msgFalhaRetry);
                 notificarAdmin(msgFalhaRetry);
                 logger.error(`Abandono de retentativa para o contrato ${item.dadosVenda.contrato}.`);
@@ -330,8 +334,9 @@ async function processarMensagem(msg) {
                 notificarAdmin(msgProcessando);
 
                 try {
+                    // [NOVO] Injetando a variável TOKEN_API_CONFIG carregada do config.txt
                     const respostaApp = await axios.post(URL_API_PYTHON, dadosVenda, { 
-                        headers: { 'Authorization': `Bearer ${TOKEN_API}` },
+                        headers: { 'Authorization': `Bearer ${TOKEN_API_CONFIG}` },
                         timeout: 180000
                     });
                     const status = respostaApp.data.status_pagamento;
@@ -340,7 +345,6 @@ async function processarMensagem(msg) {
                     
                     const msgSucesso = `[REGISTRADO] Contrato validado com sucesso.\n\nContrato: ${dadosVenda.contrato}\nCliente: ${nomeCliente}\nVendedor: ${nomeVendedor}\nPlanilha: ${planilha}\nStatus: ${status}`;
                     
-                    try { loadingMsg.edit(msgSucesso); } catch(e) {}
                     client.sendMessage(idSessaoBruto, msgSucesso);
                     notificarAdmin(msgSucesso);
 
@@ -351,14 +355,12 @@ async function processarMensagem(msg) {
 
                         if (tipoErro === 'duplicidade') {
                             const msgDup = `[REGISTRADO] ${msgErro}\n\nVendedor: ${nomeVendedor}`;
-                            try { loadingMsg.edit(msgDup); } catch(e) {}
                             client.sendMessage(idSessaoBruto, msgDup); 
                             notificarAdmin(msgDup);
                             logger.info(`Contrato ${dadosVenda.contrato} ignorado na fila. Motivo: Duplicidade (409).`);
                         
                         } else if (tipoErro === 'planilha_ausente') {
                             const msgPlan = `[ERRO DE SISTEMA] ${msgErro}\n\nVendedor: ${nomeVendedor}\n\nCrie as planilhas ou abas ausentes e reenvie a mensagem para tentar novamente.`;
-                            try { loadingMsg.edit(msgPlan); } catch(e) {}
                             client.sendMessage(idSessaoBruto, msgPlan); 
                             notificarAdmin(msgPlan);
                             logger.error(`Falha de infraestrutura no contrato ${dadosVenda.contrato}.`);
@@ -368,7 +370,6 @@ async function processarMensagem(msg) {
                             // [NOVO] Guardando idSessaoRemetente para avisar o vendedor se a retentativa falhar depois
                             filaRetentativas.push({ dadosVenda, loadingMsg, tentativas: 0, idSessaoRemetente: idSessaoBruto }); 
                             const msgNaoEnc = `[AVISO] ${msgErro}\n\nVendedor: ${nomeVendedor}\n\nO bot tentará encontrar o contrato novamente em background (esperando o portal atualizar).`;
-                            try { loadingMsg.edit(msgNaoEnc); } catch(e) {}
                             client.sendMessage(idSessaoBruto, msgNaoEnc); 
                             notificarAdmin(msgNaoEnc);
                         
@@ -376,7 +377,6 @@ async function processarMensagem(msg) {
                             logger.error(`Falha no contrato ${dadosVenda.contrato} (${tipoErro}). Transferindo para resiliência.`);
                             filaRetentativas.push({ dadosVenda, loadingMsg, tentativas: 0, idSessaoRemetente: idSessaoBruto }); 
                             const msgFalha = `[AVISO] Lentidão ou falha de gravação detectada.\nDetalhe: ${msgErro}\n\nVendedor: ${nomeVendedor}\n\nO bot transferiu o contrato para a fila de retentativas.`;
-                            try { loadingMsg.edit(msgFalha); } catch(e) {}
                             client.sendMessage(idSessaoBruto, msgFalha); 
                             notificarAdmin(msgFalha);
                         }
@@ -384,7 +384,6 @@ async function processarMensagem(msg) {
                         logger.error(`Falha de comunicação offline no contrato ${dadosVenda.contrato}. Transferindo para fila de resiliência.`);
                         filaRetentativas.push({ dadosVenda, loadingMsg, tentativas: 0, idSessaoRemetente: idSessaoBruto }); 
                         const msgOffline = `[AVISO] Falha de comunicação com o motor Python. O bot tentará registrar o contrato ${dadosVenda.contrato} novamente em background.\n\nVendedor: ${nomeVendedor}`;
-                        try { loadingMsg.edit(msgOffline); } catch(e) {}
                         client.sendMessage(idSessaoBruto, msgOffline); 
                         notificarAdmin(msgOffline);
                     }

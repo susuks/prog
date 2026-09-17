@@ -8,9 +8,11 @@ uma API REST de ingestão de dados. Extrai dados via Selenium e injeta no JSON U
 import time
 import threading
 import logging
+import re
 from logging.handlers import RotatingFileHandler
 from flask import Flask, request, jsonify
 from waitress import serve
+from flask_cors import CORS
 
 from gerador_dados import (
     PREFIXO_PLANILHA,
@@ -23,6 +25,7 @@ from gerador_dados import (
     verificar_contrato_registrado,
     registrar_contrato_unificado,
     TEMPO_INATIVIDADE_MAXIMO,
+    TOKEN_API,
 )
 
 from motor_navegacao import (
@@ -54,10 +57,10 @@ logger_api.addHandler(logging.StreamHandler())
 # INICIALIZAÇÃO DA API E ESTADO GLOBAL
 # ============================================================================
 app = Flask(__name__)
+CORS(app, origins="https://autocredbrasil.app")
 
 driver_api = None
 lock_api = threading.Lock()
-TOKEN_API_ESPERADO = "Bearer CHAVE_SECRETA_ENTERPRISE_V6"
 
 ESTADO_API = {
     "autenticado": False,
@@ -99,7 +102,7 @@ def processar_venda():
     duplicidade de contratos e comanda o motor de ingestão Selenium.
     """
     auth_header = request.headers.get("Authorization")
-    if auth_header != TOKEN_API_ESPERADO:
+    if auth_header != TOKEN_API:
         logger_api.warning("Tentativa de acesso não autorizada. Token: %s", auth_header)
         return jsonify({"erro": "nao_autorizado", "mensagem": "Acesso negado."}), 403
 
@@ -109,13 +112,14 @@ def processar_venda():
 
     contrato = str(dados.get("contrato")).strip()
     vendedor = str(dados.get("vendedor")).strip()
-    telefone_vendedor = str(dados.get("telefone")).strip()
+    telefone_vendedor = str(dados.get("telefone", "")).strip()
     origem = str(dados.get("origem", "")).strip()
 
     logger_api.info("API RECEBIDA | Contrato: %s | Vendedor: %s", contrato, vendedor)
 
     with lock_api:
 
+        # PREVINE CONDIÇÃO DE CORRIDA: Consulta a base após a porta trancada
         if verificar_contrato_registrado(contrato):
             logger_api.info("RECUSADO | O contrato %s já consta no sistema.", contrato)
             return (
@@ -195,7 +199,6 @@ def processar_venda():
                             texto_st,
                         )
 
-                    # Injeção Direta na Memória de Monitoramento (Substitui as filas pendentes)
                     registrar_contrato_unificado(
                         contrato=contrato,
                         vendedor_nome=vendedor,
@@ -211,6 +214,12 @@ def processar_venda():
                         contrato,
                     )
 
+                    # [NOVO] Formatar Telefone do Cliente com DDI 55
+                    tel_cliente = str(dados_site.get("telefone", ""))
+                    numeros_limpos = re.sub(r"\D", "", tel_cliente)
+                    tel_cliente_limpo = f"55{numeros_limpos}" if numeros_limpos else ""
+
+                    # [A BANDEJA DE DEVOLUÇÃO PARA O SITE]
                     return (
                         jsonify(
                             {
@@ -218,6 +227,20 @@ def processar_venda():
                                 "status_pagamento": texto_st,
                                 "planilha": nome_planilha_vendedor,
                                 "nome_cliente": str(dados_site.get("nome", "-")),
+                                "dados_completos": {
+                                    "contrato": contrato,
+                                    "vendedor": vendedor,
+                                    "origem": origem,
+                                    "cpf": dados_site.get("cpf"),
+                                    "grupo": dados_site.get("grupo"),
+                                    "cota": dados_site.get("cota"),
+                                    "versao": dados_site.get("versao"),
+                                    "estado_uf": dados_site.get("estado"),
+                                    "valor_credito": dados_site.get("credito"),
+                                    "data_venda_painel": dados_site.get("data_venda"),
+                                    "primeira_parcela_paga": dados_site.get("pago"),
+                                    "telefone_cliente": str(tel_cliente_limpo),
+                                },
                             }
                         ),
                         200,

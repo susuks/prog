@@ -231,6 +231,7 @@ def loop_reanalise_adimplencia():
     sessao_http = criar_sessao_hibrida()
     ultimo_login = time.time()
     executor_sheets = ThreadPoolExecutor(max_workers=1)
+    executor_webhooks = ThreadPoolExecutor(max_workers=1)
 
     while True:
         agora = time.time()
@@ -365,12 +366,11 @@ def loop_reanalise_adimplencia():
             duracao_web = time.time() - tempo_inicio_web
 
             if dados_rede["encontrou"]:
-                # Sucesso! Reseta o Disjuntor Global e os Strikes
+
                 falhas_inexplicaveis = 0
                 info["falhas_consecutivas"] = 0
                 info["ultima_verificacao"] = time.time()
 
-                # Como provamos que a Autocred está online, libera qualquer Inacessível pendente
                 for lp in limbos_pendentes:
                     executor_sheets.submit(disparar_limbo_async, *lp)
                 limbos_pendentes.clear()
@@ -449,20 +449,33 @@ def loop_reanalise_adimplencia():
                 # --- DELTA CACHE DE ADIMPLÊNCIA (Longo Prazo) ---
                 fotografia = f"[{st_atual} | {pc_atual} parc. | Ativo]"
 
-                if (
+                # Regra 1: Precisamos preencher as células vazias no Sheets?
+                primeira_nao_paga = not info.get("primeira_parcela_paga")
+
+                # Regra 2: Houve uma alteração real no status financeiro do cliente?
+                houve_mutacao = (
                     st_atual != st_anterior
                     or pc_atual != pc_anterior
                     or recuperou_do_limbo
-                ):
+                )
+
+                if houve_mutacao or primeira_nao_paga:
+
                     if recuperou_do_limbo:
                         logger_crm.info(
                             "    [RESSURREIÇÃO] %s saiu do Limbo.", contrato
                         )
-                    else:
+                    elif houve_mutacao:
+                        # Só grita 'Atualização' se a mutação for real
                         logger_crm.info(
                             "    [ATUALIZAÇÃO] %s -> %s. Adicionado ao cesto...",
                             contrato,
                             fotografia,
+                        )
+                    else:
+                        # Aviso discreto de que está apenas a preencher a planilha
+                        logger_crm.info(
+                            "    [PLANILHA] Anotando %s pendente na base...", contrato
                         )
 
                     buffer_atualizacoes.append(
@@ -479,6 +492,57 @@ def loop_reanalise_adimplencia():
 
                     info["ultimo_status"] = st_atual
                     info["ultimas_parcelas"] = pc_atual
+
+                    # =================================================================
+                    # WEBHOOK DE ATUALIZAÇÃO PARA O SITE (Blindado)
+                    # =================================================================
+                    # Só avisa o site se o cliente pagar, atrasar, ou sair do limbo.
+
+                    if houve_mutacao:
+                        url_webhook = "https://autocredbrasil.app/api/webhook/cda"
+
+                        headers_webhook = {
+                            "Authorization": "Bearer K01GFBehTTheBFG10k",
+                            "Content-Type": "application/json",
+                        }
+
+                        payload_webhook = {
+                            "contrato": contrato,
+                            "status_pagamento": st_atual,
+                            "parcelas_pagas": pc_atual,
+                            "status_cliente": "Ativo",
+                        }
+
+                        def disparar_webhook_em_background(url, dados, cabecalhos):
+                            try:
+                                # [CORREÇÃO] Injeção do parâmetro headers=cabecalhos
+                                res = requests.post(
+                                    url, json=dados, headers=cabecalhos, timeout=10
+                                )
+                                if res.status_code in (200, 201):
+                                    logger_crm.info(
+                                        "    [WEBHOOK SUCESSO] Site notificado sobre o contrato %s.",
+                                        dados["contrato"],
+                                    )
+                                else:
+                                    logger_crm.warning(
+                                        "    [WEBHOOK AVISO] Site retornou código %s.",
+                                        res.status_code,
+                                    )
+                            except requests.exceptions.RequestException:
+                                logger_crm.warning(
+                                    "    [ERRO WEBHOOK] O site não respondeu ao alerta."
+                                )
+
+                        # Passamos os cabecalhos como argumento extra para a thread
+                        executor_webhooks.submit(
+                            disparar_webhook_em_background,
+                            url_webhook,
+                            payload_webhook,
+                            headers_webhook,
+                        )
+                    # =================================================================
+
                 else:
                     logger_crm.info(
                         "    [IGUAL] %s -> %s. Nenhuma ação.", contrato, fotografia
@@ -576,6 +640,13 @@ def loop_reanalise_adimplencia():
                                         "    [EXPIRADO NO LIMBO] Contrato %s.", contrato
                                     )
                                     info["monitorar"] = False
+                                else:
+                                    # [NOVO] Log explícito
+                                    logger_crm.info(
+                                        "    [LIMBO] Contrato %s ignorado silenciosamente (Falha %d).",
+                                        contrato,
+                                        falhas,
+                                    )
                         else:
                             logger_crm.warning(
                                 "    [GLITCH SERVER] Contrato %s não encontrado (Alerta %d/3). Mantendo Ativo.",
@@ -642,7 +713,7 @@ def loop_reanalise_adimplencia():
 
                 # Força a destruição da sessão para re-login depois de 20 minutos (1200 segs)
                 sessao_http = None
-                time.sleep(1200)
+                time.sleep(120)
                 break
 
         # Fora do Loop For, no fim da fila, descarrega o que sobrou no limbo (se o servidor não caiu)

@@ -96,6 +96,7 @@ def obter_mes_utc4() -> str:
 CONFIG = carregar_configuracoes()
 USUARIO_LOGIN = CONFIG.get("MATRICULA")
 SENHA_LOGIN = CONFIG.get("SENHA")
+TOKEN_API = CONFIG.get("TOKEN_API")
 PREFIXO_PLANILHA = CONFIG.get("PREFIXO_PLANILHA")
 NOME_ABA_GERAL = CONFIG.get("ANO_GERAL")
 MODO_DESKTOP = CONFIG.get("MODO_DESKTOP")
@@ -185,7 +186,7 @@ def verificar_contrato_registrado(contrato: str) -> bool:
     if os.path.exists(ARQUIVO_HISTORICO_SUCESSO):
         try:
             with open(ARQUIVO_HISTORICO_SUCESSO, "r", encoding="utf-8") as f:
-                if str(contrato) in f.read():
+                if f"{contrato}," in f.read():
                     return True
         except OSError:
             pass
@@ -362,7 +363,7 @@ def encontrar_proxima_linha_vazia(sheet, start_row: int, check_col: int) -> int:
 
     try:
         if linha_vazia > sheet.row_count:
-            sheet.add_rows(500)
+            sheet.add_rows(15)
             logger.info(
                 "   [EXPANSÃO] O limite da aba '%s' foi atingido. "
                 "Grade expandida em +500 linhas automaticamente.",
@@ -431,6 +432,9 @@ def atualizar_planilha_vendedor(
         str(dados_site.get("grupo", "")),
         str(dados_site.get("cota", "")),
         str(dados_site.get("estado", "")),
+        "PAGO" if dados_site.get("pago") else "PENDENTE", # Adiciona Status Pagamento
+        1 if dados_site.get("pago") else 0,               # Adiciona Parcela
+        "Ativo"                                           # Adiciona Status Cliente
     ]
 
     sheet.update_cell(linha, 2, status_pag)
@@ -439,8 +443,9 @@ def atualizar_planilha_vendedor(
         values=[dados_cadastrais],
         value_input_option="USER_ENTERED",
     )
+    # MUDE O FINAL DE P{linha} PARA S{linha}
     sheet.update(
-        range_name=f"J{linha}:P{linha}",
+        range_name=f"J{linha}:S{linha}", 
         values=[dados_financeiros],
         value_input_option="USER_ENTERED",
     )
@@ -496,6 +501,9 @@ def atualizar_planilha_geral(
         str(dados_site.get("cpf", "")),
         str(row_csv.get("vendedor", "")),
         data_registro_atual,
+        "PAGO" if dados_site.get("pago") else "PENDENTE", # Adiciona Status Pagamento
+        1 if dados_site.get("pago") else 0,               # Adiciona Parcela
+        "Ativo"                                           # Adiciona Status Cliente
     ]
 
     sheet.update_cell(linha, 1, status_pag)
@@ -504,8 +512,9 @@ def atualizar_planilha_geral(
         values=[dados_cadastrais],
         value_input_option="USER_ENTERED",
     )
+    # MUDE O FINAL DE R{linha} PARA U{linha}
     sheet.update(
-        range_name=f"I{linha}:R{linha}",
+        range_name=f"I{linha}:U{linha}",
         values=[dados_financeiros],
         value_input_option="USER_ENTERED",
     )

@@ -7,10 +7,13 @@ echo ==========================================
 :: 1. Inicia o Coletor Python (Intranet)
 ::start "1. COLETOR" cmd /k "python main.py"
 
-:: 2. Inicia o Monitor de Vendas (Texto)
+:: 1. Inicia o Coletor Python (Intranet)
+::start "1. COLETOR" cmd /k "python site_main.py"
+
+:: 2. Inicia o Monitor de CDA
 start "2. CDA" cmd /k "python cda_main.py"
 
-:: 3. Inicia o Monitor de Vendas (Texto)
+:: 3. Inicia o Monitor de Vendas 
 ::start "3. MONITOR" cmd /k "node monitor.js"
 
 :: 4. Inicia o Carteiro de Mídia

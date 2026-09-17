@@ -5,9 +5,7 @@ __pycache__/
 venv/
 
 # Sessões e Autenticação
-.wwebjs_auth/
-.wwebjs_cache/
-.wwebjs_auth_media/
+.wwebjs*/
 session-sessao-media/
 
 # Credenciai, Configurações Pessoais, logs, etc...
@@ -15,13 +13,12 @@ files/*.log*
 files/*.json
 files/*.html
 files/*.tmp
-files/sticker_pronto.webp
-files/sticker_id.txt
-files/config.txt
+files/*.webp
+files/*.txt
 files/vendedores.csv
 files/vendedores enc.csv
 files/historico_concluidos.csv
 /importador_cda.py
 /coletor_manual.py
-/test.py
-/main_*
+/*test*
+/*.code-workspace
