@@ -21,7 +21,7 @@ from gerador_dados import (
     TOKEN_API,
 )
 
-from motor_navegacao import (
+from old.motor_navegacao import (
     iniciar_navegador,
     fazer_login_com_ia,
 )

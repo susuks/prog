@@ -32,7 +32,7 @@ from gerador_dados import (
     salvar_historico_concluido,
 )
 
-from motor_navegacao import iniciar_navegador, fazer_login_com_ia
+from old.motor_navegacao import iniciar_navegador, fazer_login_com_ia
 
 log_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 logger_crm = logging.getLogger("EnterpriseCRM")
