@@ -1,0 +1,25 @@
+# Dependências gigantes
+node_modules/
+__pycache__/
+*.pyc
+venv/
+
+# Sessões e Autenticação
+.wwebjs*/
+session-sessao-media/
+
+# Credenciai, Configurações Pessoais, logs, etc...
+api_trad/
+files/*.log*
+files/*.json
+files/*.html
+files/*.tmp
+files/*.webp
+files/*.txt
+files/vendedores.csv
+files/vendedores enc.csv
+files/historico_concluidos.csv
+/importador_cda.py
+/coletor_manual.py
+/*test*
+/*.code-workspace

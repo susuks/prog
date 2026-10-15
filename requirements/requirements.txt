@@ -1,0 +1,8 @@
+selenium
+webdriver-manager
+gspread
+oauth2client
+Flask
+requests
+waitress
+beautifulsoup4
