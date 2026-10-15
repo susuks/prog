@@ -1,0 +1,11 @@
+# Dependências gigantes
+__pycache__/
+*.pyc
+venv/
+
+# Credenciais, Configurações Pessoais, logs, etc...
+/*test*
+/*.code-workspace
+/files/
+/api_trad/
+.env

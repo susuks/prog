@@ -1,0 +1,11 @@
+selenium
+webdriver-manager
+Flask
+flask-cors
+requests
+waitress
+beautifulsoup4
+pymupdf
+Pillow
+pyzbar
+python-dotenv
