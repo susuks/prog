@@ -27,11 +27,39 @@ prog/
 │   ├── extrator_boleto.py   # Leitura em memória RAM de PDF, QR Code PIX e Código de Barras
 │   ├── schemas.py           # Contratos de dados estritos (Dataclasses) para validação de saída
 │   └── utils.py             # Formatação monetária/datas e controle de hibernação UTC-4
-├── requirements/
-│   └── requirements.txt     # Dependências Python do ambiente de produção
 ├── .env.example             # Modelo de variáveis de ambiente e endpoints
+├── .gitignore               # Regras de exclusão de artefatos locais e credenciais
 ├── ARCHITECTURE.md          # Documentação técnica da arquitetura
 ├── README.md                # Documentação executiva e guia de implantação
+├── deploy.sh                # Script de implantação e atualização automatizada (Ubuntu/Debian)
 ├── ecosystem.config.js      # Orquestração declarativa do PM2 com limites de RAM
+├── requirements.txt         # Dependências Python do ambiente de produção
 ├── site_main.py             # Entrypoint 1: API WSGI (Waitress - Porta 5050)
 └── api_cda_main.py          # Entrypoint 2: Worker de Sincronização Contínua (Polling 1h)
+```
+
+*(Nota: A versão anterior acoplada ao WhatsApp e Google Sheets é mantida isoladamente na branch `legacy`).*
+
+---
+
+## 3. Endpoints da API (`site_main.py` - Porta 5050)
+
+### `GET /health`
+
+Retorna o diagnóstico em tempo real do serviço sem acionar bloqueios na sessão:
+
+* `status`: `"online"`, `"hibernating"` ou `"degraded"`
+* `sessao_ativa`: booleano indicando se a sessão HTTP está autenticada
+* `em_cooldown`: booleano indicando se o disjuntor de proteção da CapSolver está ativo
+* `ocupado`: booleano indicando se o `lock_api` está em uso no momento
+* `uptime_segundos` e `ultimo_login_segundos`
+
+### `POST /processar_venda`
+
+Requer cabeçalho `Authorization` validado via comparação em tempo constante (`hmac.compare_digest`).
+
+* **200 OK:** Retorna os dados cadastrais validados por `DadosVendaSchema` e agenda o envio do boleto via Webhook.
+* **403 Forbidden:** Token de autenticação ausente ou inválido.
+* **404 Not Found:** Contrato não localizado no portal.
+* **429 Too Many Requests:** Servidor ocupado processando outra requisição na intranet após timeout de 15s da fila.
+* **503 Service Unavailable:** Fora da janela operacional (Hibernação entre 21:00 e 06:30 UTC-4).

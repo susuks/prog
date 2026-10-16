@@ -22,9 +22,61 @@ Serviço de alta disponibilidade responsável pela extração cadastral expressa
 
 ---
 
-## Pré-requisitos de Sistema
+## Implantação Automatizada (Ubuntu / Debian)
 
-No servidor Ubuntu/Debian, instale a biblioteca nativa necessária para decodificação óptica de códigos de barras:
+O repositório conta com o script `deploy.sh`, que automatiza a verificação da biblioteca óptica do sistema (`libzbar0`), atualização do código via Git, configuração do ambiente virtual (`venv`), instalação do `requirements.txt` e recarregamento dos processos no PM2:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y libzbar0
+chmod +x deploy.sh
+./deploy.sh
+```
+
+---
+
+## Instalação Manual Passo a Passo
+
+1. Instale a biblioteca nativa necessária para decodificação óptica de códigos de barras:
+
+   ```bash
+   sudo apt-get update && sudo apt-get install -y libzbar0 python3-venv
+   ```
+
+2. Crie o ambiente virtual e instale as dependências Python da raiz:
+
+   ```bash
+   python3 -m venv venv
+   source venv/bin/activate
+   pip install -r requirements.txt
+   ```
+
+3. Configure as variáveis de ambiente copiando o arquivo de modelo:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+   Preencha o arquivo `.env` com as credenciais do portal, chave da CapSolver, URLs e tokens de autenticação.
+
+---
+
+## Execução e Orquestração (PM2)
+
+O arquivo `ecosystem.config.js` gerencia simultaneamente a API síncrona (`site_main.py`) e o Worker de sincronização de carteira (`api_cda_main.py`):
+
+```bash
+# Iniciar ou recarregar os serviços com limite de RAM configurado
+pm2 startOrReload ecosystem.config.js --update-env
+
+# Verificar status e consumo de memória
+pm2 status
+
+# Acompanhar logs em tempo real
+pm2 logs
+```
+
+---
+
+## Estrutura de Branches
+
+* **`main`:** Arquitetura atual Server-to-Server (API REST + Worker de Sincronização GZIP).
+* **`legacy`:** Versão anterior do motor integrada diretamente ao WhatsApp (`whatsapp-web.js`) e planilhas do Google Sheets (`gspread`).

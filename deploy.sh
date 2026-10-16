@@ -16,7 +16,7 @@ if [ ! -d "venv" ]; then
     python3 -m venv venv
 fi
 ./venv/bin/pip install --upgrade pip -q
-./venv/bin/pip install -r /requirements.txt -q
+./venv/bin/pip install -r requirements.txt -q
 
 echo ">>> [4/5] Verificando arquivo de variaveis de ambiente (.env)..."
 if [ ! -f ".env" ]; then
