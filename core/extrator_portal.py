@@ -182,7 +182,7 @@ def consultar_venda_http_completa(sessao: requests.Session, contrato: str) -> di
                     f"descricao_formulario_filho_intranet=Telefones"
                 )
                 sessao.headers.update({"Referer": url_painel_atual})
-                res_tel = sessao.get(url_tel, timeout=10)
+                res_tel = sessao.get(url_tel, timeout=15)
 
                 if "j_username" not in res_tel.text.lower():
                     sopa_tel = BeautifulSoup(res_tel.text, "html.parser")
@@ -203,7 +203,7 @@ def consultar_venda_http_completa(sessao: requests.Session, contrato: str) -> di
                     f"TIPO=0&codigo_grupo={grupo_cliente}&codigo_cota={cota_cliente}&processo="
                 )
                 sessao.headers.update({"Referer": url_painel_atual})
-                res_end = sessao.get(url_end, timeout=10)
+                res_end = sessao.get(url_end, timeout=15)
 
                 if "j_username" not in res_end.text.lower():
                     sopa_end = BeautifulSoup(res_end.text, "html.parser")

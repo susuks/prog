@@ -36,7 +36,7 @@ from core.extrator_portal import extrair_relatorio_desistentes
 logger_cda = configurar_logger("CDAWorker", "files/cda_sistema.log")
 
 MODO_TESTE = False  # Se True, salva os JSONs localmente sem enviar ao site
-ARQUIVO_ESTADO_LOCAL = os.path.join(PASTA_TEMP_CDA, "ultima_atualizacao.json")
+ARQUIVO_ESTADO_LOCAL = os.path.join(PASTA_TEMP_CDA, ".estado_sincronizado.lock")
 
 
 def allowed_gai_family() -> int:

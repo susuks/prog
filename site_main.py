@@ -5,6 +5,7 @@ Arquitetura Server-to-Server com Ingestão HTTP Pura (requests).
 Inclui validação de Schemas, endpoint de observabilidade (/health) e Cooldown.
 """
 
+import hmac
 import time
 import threading
 import requests
@@ -80,7 +81,7 @@ def garantir_sessao_http():
 # ============================================================================
 # TAREFAS EM BACKGROUND
 # ============================================================================
-def tarefa_background_boleto(sessao, cpf, grupo, cota, contrato, url_custom=None):
+def tarefa_background_boleto(cpf, grupo, cota, contrato, url_custom=None):
     """Extrai PDF em memória e dispara o Webhook respeitando o lock principal."""
     logger_api.info(
         "[FILA BOLETO] Contrato %s aguardando liberação do lock...", contrato
@@ -91,7 +92,18 @@ def tarefa_background_boleto(sessao, cpf, grupo, cota, contrato, url_custom=None
             "[FILA BOLETO] lock_api Liberada. Extraindo PDF do contrato %s...",
             contrato,
         )
-        boleto = extrair_pdf_boleto_memoria(sessao, cpf, grupo, cota)
+        try:
+            garantir_sessao_http()
+            boleto = extrair_pdf_boleto_memoria(
+                ESTADO_API["sessao_http"], cpf, grupo, cota
+            )
+        except Exception as e_bol:  # pylint: disable=broad-exception-caught
+            logger_api.error(
+                "[ERRO BOLETO] Falha na sessão ao extrair PDF (%s): %s",
+                contrato,
+                e_bol,
+            )
+            boleto = {"qr_code": "", "codigo_barras": ""}
 
     url_webhook_boleto = url_custom or URL_WEBHOOK_BOLETO
 
@@ -161,10 +173,9 @@ def processar_venda():
             ),
             503,
         )
-
-    auth_header = request.headers.get("Authorization")
-    if auth_header != TOKEN_API:
-        logger_api.warning("Acesso não autorizado. Token: %s", auth_header)
+    auth_header = request.headers.get("Authorization") or ""
+    if not TOKEN_API or not hmac.compare_digest(auth_header, TOKEN_API):
+        logger_api.warning("Acesso não autorizado. Token inválido.")
         return jsonify({"erro": "nao_autorizado", "mensagem": "Acesso negado."}), 403
 
     dados = request.json
@@ -224,7 +235,6 @@ def processar_venda():
                 threading.Thread(
                     target=tarefa_background_boleto,
                     args=(
-                        ESTADO_API["sessao_http"],
                         cpf_cli,
                         grupo_cli,
                         cota_cli,
@@ -350,7 +360,7 @@ def loop_keep_alive():
 
 
 if __name__ == "__main__":
-    logger_api.info(">>> INICIANDO SISTEMA ENTERPRISE V6 (API HTTP PURA) <<<")
+    logger_api.info(">>> INICIANDO SISTEMA ENTERPRISE V4.0 (API HTTP PURA) <<<")
 
     if not is_hibernando():
         try:
